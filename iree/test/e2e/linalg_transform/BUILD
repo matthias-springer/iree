@@ -19,6 +19,7 @@ iree_lit_test_suite(
     # transformation, it needs to be included as data.
     data = [
         "//iree/test/e2e/linalg_transform:linalg_transform_spec.mlir",
+        "//iree/test/e2e/linalg_transform:linalg_transform_inparallel_buffers_spec.mlir",
     ],
     tags = [
         "hostonly",

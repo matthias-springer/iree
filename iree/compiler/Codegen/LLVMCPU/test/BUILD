@@ -39,9 +39,15 @@ iree_lit_test_suite(
         include = ["*.mlir"],
         # linalg_transform_spec is a an MLIR file that specifies a
         # transformation, it needs to be included as data.
-        exclude = ["linalg_transform_spec.mlir"],
+        exclude = [
+            "linalg_transform_inparallel_buffers_spec.mlir",
+            "linalg_transform_spec.mlir",
+        ],
     ),
-    data = ["linalg_transform_spec.mlir"],
+    data = [
+        "linalg_transform_inparallel_buffers_spec.mlir",
+        "linalg_transform_spec.mlir",
+    ],
     tools = [
         "//iree/tools:iree-compile",
         "//iree/tools:iree-opt",
