@@ -107,6 +107,8 @@ static bool isaTensor(Type t) { return t.isa<TensorType>(); };
 static LogicalResult initTensorElimination(Operation *op) {
   // Analyze IR.
   OneShotBufferizationOptions options;
+  options.denyOperationInFilter(arith::ConstantOp::getOperationName());
+  options.denyOperationInFilter(bufferization::ToMemrefOp::getOperationName());
   OneShotAnalysisState state(op, options);
   if (failed(analyzeOp(op, state))) return failure();
 
@@ -139,6 +141,7 @@ void IREEComprehensiveBufferizePass::runOnOperation() {
   options.printConflicts = printConflicts;
   options.alwaysAliasingWithDest = true;
   options.denyOperationInFilter(arith::ConstantOp::getOperationName());
+  options.denyOperationInFilter(bufferization::ToMemrefOp::getOperationName());
   addPostAnalysisTransformations(options);
 
   if (failed(bufferization::runOneShotBufferize(moduleOp, options))) {
