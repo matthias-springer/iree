@@ -294,6 +294,27 @@ static LogicalResult isDimDynamic(PatternRewriter &rewriter,
   return success(shapedType && shapedType.isDynamicDim(dim));
 }
 
+static LogicalResult hasNoConsumingLinalgPointwise(PatternRewriter &rewriter,
+                                                   Operation *op) {
+  for (OpResult result : op->getOpResults()) {
+    for (OpOperand &use : result.getUses()) {
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(use.getOwner());
+      if (!linalgOp)
+        continue;
+      if (!isParallelIterator(linalgOp.getIteratorTypes()[use.getOperandNumber()]))
+        continue;
+      return failure();
+    }
+  }
+
+  return success();
+}
+
+static LogicalResult implementsTilingInterface(PatternRewriter &rewriter,
+                                               Operation *op) {
+  return success(isa<TilingInterface>(op));
+}
+
 //===----------------------------------------------------------------------===//
 // StructuredTransformOpsExtension
 //===----------------------------------------------------------------------===//
@@ -310,6 +331,8 @@ transform_ext::StructuredTransformOpsExtension::
   registerPDLMatchConstraintFn("isDimMultipleOf", isDimMultipleOf);
   registerPDLMatchConstraintFn("isDimStatic", isDimStatic);
   registerPDLMatchConstraintFn("isEquivalentToOp", isEquivalentToOp);
+  registerPDLMatchConstraintFn("hasNoConsumingLinalgPointwise", hasNoConsumingLinalgPointwise);
+  registerPDLMatchConstraintFn("implementsTilingInterface", implementsTilingInterface);
 
   declareDependentDialect<bufferization::BufferizationDialect>();
   declareDependentDialect<vector::VectorDialect>();
