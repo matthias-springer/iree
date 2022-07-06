@@ -141,6 +141,8 @@ private:
   SmallVector<int64_t> operandsToFuse;
 };
 
+LogicalResult fuseAllOperands(TilingInterface consumerOp, PatternRewriter &rewriter);
+
 } // namespace LinalgExt
 } // namespace IREE
 } // namespace iree_compiler

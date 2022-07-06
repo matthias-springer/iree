@@ -294,6 +294,49 @@ static LogicalResult isDimDynamic(PatternRewriter &rewriter,
   return success(shapedType && shapedType.isDynamicDim(dim));
 }
 
+static LogicalResult stage1Tiling(PatternRewriter &rewriter,
+                                                   Operation *op) {
+  // Any Linalg named op or generic op with reduction iterator types is a root
+  // op.
+  if (auto genericOp = dyn_cast<linalg::GenericOp>(op))
+    if (genericOp.getNumReductionLoops() == 0)
+      return failure();
+
+  if (isa<linalg::FillOp, tensor::ExtractSliceOp, tensor::InsertSliceOp>(op))
+    return failure();
+
+  for (OpResult result : op->getOpResults()) {
+    for (OpOperand &use : result.getUses()) {
+      auto linalgOp = dyn_cast<linalg::LinalgOp>(use.getOwner());
+      if (!linalgOp)
+        continue;
+      
+      // Only out operands are fused.
+      linalg::OpOperandVector inputOpOperands = linalgOp.getInputOperands();
+      if (llvm::find(inputOpOperands, &use) != inputOpOperands.end())
+        continue;
+
+      // Only point-wise operations are fused.
+      bool isPointwise =
+          llvm::all_of(linalgOp.getIteratorTypes(), isParallelIterator);
+      if (isPointwise)
+        return failure();
+    }
+  }
+
+  return success();
+}
+
+static LogicalResult implementsTilingInterface(PatternRewriter &rewriter,
+                                               Operation *op) {
+  return success(isa<TilingInterface>(op));
+}
+
+static LogicalResult isNotTiled(PatternRewriter &rewriter,
+                                Operation *op) {
+  return failure(static_cast<bool>(op->getParentOfType<scf::ForeachThreadOp>()));
+}
+
 //===----------------------------------------------------------------------===//
 // StructuredTransformOpsExtension
 //===----------------------------------------------------------------------===//
@@ -310,6 +353,11 @@ transform_ext::StructuredTransformOpsExtension::
   registerPDLMatchConstraintFn("isDimMultipleOf", isDimMultipleOf);
   registerPDLMatchConstraintFn("isDimStatic", isDimStatic);
   registerPDLMatchConstraintFn("isEquivalentToOp", isEquivalentToOp);
+  registerPDLMatchConstraintFn("stage1Tiling",
+                               stage1Tiling);
+  registerPDLMatchConstraintFn("implementsTilingInterface",
+                               implementsTilingInterface);
+  registerPDLMatchConstraintFn("isNotTiled", isNotTiled);
 
   declareDependentDialect<bufferization::BufferizationDialect>();
   declareDependentDialect<vector::VectorDialect>();

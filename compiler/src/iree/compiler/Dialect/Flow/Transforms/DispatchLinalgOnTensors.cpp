@@ -990,6 +990,11 @@ static unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
     SmallVector<Operation *> roots;
     for (Operation &op : llvm::reverse(block)) {
       // Start with a root operation and fuse its producers.
+      if(isRootOp(&op)) {
+        llvm::errs() << " is root:   ";
+        op.dump();
+      }
+
       if (hasFusionGroupsAttribute(&op) || !isRootOp(&op)) continue;
       unsigned newGroup = numRootOps++;
       setRootAttribute(context, &op, newGroup);
@@ -1161,6 +1166,10 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
   MLIRContext *context = &getContext();
   DominanceInfo const &dominanceInfo = getAnalysis<DominanceInfo>();
   decideFusableLinalgOps(funcOp, dominanceInfo);
+
+  llvm::errs() << "AFTER decideFusableLinalgOps:\n";
+  getOperation()->dump();
+  llvm::errs() << "\n\n\n";
 
   LLVM_DEBUG({
     llvm::dbgs() << "\n--- After annotating linalg op fusion scheme ---\n";

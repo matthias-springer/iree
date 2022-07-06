@@ -64,6 +64,24 @@ mlir::iree_compiler::IREE::LinalgExt::LinalgExtFusionInContainingOpPattern::
   return fusedOps;
 }
 
+static FailureOr<Value> fuseOperand(Value operand, PatternRewriter &rewriter) {
+  // Ensure that the operand is a slice of a producer result.
+  auto sliceOp = operand.getDefiningOp<tensor::ExtractSliceOp>();
+  if (!sliceOp)
+    return failure();
+  auto producerOp = sliceOp.source().getDefiningOp<TilingInterface>();
+  if (!producerOp || producerOp->getNumResults() != 1)
+    return failure();
+
+  SmallVector<Value> destinationOperands =
+      producerOp.getDestinationOperands(rewriter);
+
+  // Tile the producer.
+  return producerOp.generateResultTileValue(
+      rewriter, /*resultNumber=*/0, destinationOperands,
+      sliceOp.getMixedOffsets(), sliceOp.getMixedSizes(), true);
+}
+
 FailureOr<FusionResult> LinalgExtFusionPattern::returningMatchAndRewrite(
     TilingInterface consumerOp, PatternRewriter &rewriter) const {
   // Try to fuse the producers of all operands to fuse.
@@ -73,36 +91,40 @@ FailureOr<FusionResult> LinalgExtFusionPattern::returningMatchAndRewrite(
     if (operandToFuse >= consumerOp->getNumOperands())
       return failure();
 
-    // Check the operand is a slice of a producer result.
-    auto sliceOp = consumerOp->getOperand(operandToFuse)
-                       .getDefiningOp<tensor::ExtractSliceOp>();
-    if (!sliceOp)
-      return failure();
-    auto producerOp = sliceOp.source().getDefiningOp<TilingInterface>();
-    if (!producerOp || producerOp->getNumResults() != 1)
-      return failure();
-
-    SmallVector<Value> destinationOperands =
-        producerOp.getDestinationOperands(rewriter);
-
     // Tile the producer.
-    FailureOr<Value> tiledProducer = producerOp.generateResultTileValue(
-        rewriter, /*resultNumber=*/0, destinationOperands,
-        sliceOp.getMixedOffsets(), sliceOp.getMixedSizes(), true);
+    FailureOr<Value> tiledProducer =
+        fuseOperand(consumerOp->getOperand(operandToFuse), rewriter);
     if (failed(tiledProducer))
       return failure();
+
+    // Update the consumer in-place using the tiled producer.
+    rewriter.updateRootInPlace(consumerOp, [&]() {
+      consumerOp->setOperand(operandToFuse, *tiledProducer);
+    });
     fusedOps.push_back(cast<TilingInterface>(tiledProducer->getDefiningOp()));
   }
 
-  // Update the consumer in-place using the tiled producer results.
-  SmallVector<Value> newOperands = consumerOp->getOperands();
-  for (auto it : llvm::zip(operandsToFuse, fusedOps)) {
-    int64_t operandToFuse = std::get<0>(it);
-    TilingInterface fusedOp = std::get<1>(it);
-    newOperands[operandToFuse] = fusedOp->getResult(0);
-  }
-  rewriter.updateRootInPlace(consumerOp,
-                             [&]() { consumerOp->setOperands(newOperands); });
-
   return FusionResult{consumerOp, fusedOps};
+}
+
+LogicalResult mlir::iree_compiler::IREE::LinalgExt::fuseAllOperands(
+    TilingInterface consumerOp, PatternRewriter &rewriter) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(consumerOp);
+  bool changed = false;
+
+  for (OpOperand &opOperand : consumerOp->getOpOperands()) {
+    // Tile the producer.
+    FailureOr<Value> tiledProducer = fuseOperand(opOperand.get(), rewriter);
+    if (failed(tiledProducer))
+      continue;
+
+    // Update the consumer in-place using the tiled producer.
+    rewriter.updateRootInPlace(consumerOp,
+                               [&]() { opOperand.set(*tiledProducer); });
+
+    changed = true;
+  }
+
+  return success(changed);
 }
