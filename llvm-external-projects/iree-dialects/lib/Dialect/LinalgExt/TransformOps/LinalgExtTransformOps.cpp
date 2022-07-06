@@ -140,6 +140,19 @@ LinalgExt::TileToForeachOp::applyToOne(linalg::LinalgOp target,
           cast<TilingInterface>(target.getOperation()), rewriter);
   if (failed(result))
     return DiagnosedSilenceableFailure(reportUnknownTransformError(target));
+
+  if (getFuseProducersGreedily()) {
+    // Fuse all producers greedily. Look for tileable ops inside tileOp and
+    // fuse them one-by-one.
+    auto fuseNextOp = [&](TilingInterface tiledOp) {
+      if (fuseAllOperands(tiledOp, rewriter).succeeded())
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    };
+    while (result->tileOp->walk(fuseNextOp).wasInterrupted()) {
+    }
+  }
+
   results.assign({result->tileOp, result->tiledOp});
   return DiagnosedSilenceableFailure(success());
 }
