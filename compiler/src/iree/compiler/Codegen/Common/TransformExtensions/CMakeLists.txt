@@ -22,6 +22,16 @@ iree_tablegen_library(
     --gen-enum-defs CommonExtensionsAttrs.cpp.inc
 )
 
+iree_tablegen_library(
+  NAME
+    CommonExtensionsInterfaceGen
+  TD_FILE
+    "CommonExtensionsInterfaces.td"
+  OUTS
+    --gen-op-interface-decls CommonExtensionsInterfaces.h.inc
+    --gen-op-interface-defs CommonExtensionsInterfaces.cpp.inc
+)
+
 iree_cc_library(
   NAME
     CommonExtensions
@@ -34,6 +44,7 @@ iree_cc_library(
     "CommonExtensionsAttrs.cpp.inc"
     "CommonExtensionsOps.cpp.inc"
   DEPS
+    ::CommonExtensionsInterfaceGen
     ::CommonExtensionsOpGen
     IREEDialectsTransforms
     IREELinalgTransformDialect

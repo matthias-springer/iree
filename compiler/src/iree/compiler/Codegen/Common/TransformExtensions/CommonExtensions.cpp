@@ -30,6 +30,17 @@ void mlir::iree_compiler::registerTransformDialectCommonExtension(
 }
 
 //===---------------------------------------------------------------------===//
+// MatchConstraintsOpInterface
+//===---------------------------------------------------------------------===//
+
+LogicalResult transform_dialect::detail::verifyMatchConstraintOpInterface(
+    Operation *op) {
+  if (op->getNumResults() > 0)
+    return op->emitOpError("constraints cannot have results");
+  return success();
+}
+
+//===---------------------------------------------------------------------===//
 // ApplyPatternsOp
 //===---------------------------------------------------------------------===//
 
@@ -177,7 +188,101 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
 // MatchOp
 //===---------------------------------------------------------------------===//
 
+DiagnosedSilenceableFailure transform_dialect::MatchOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  Block *body = getBody();
+  ArrayRef<Operation *> payloadOps = state.getPayloadOps(getTarget());
+  if (payloadOps.size() != 1)
+    return DiagnosedSilenceableFailure(
+        this->emitOpError("requires exactly one target handle"));
+
+  SmallVector<Operation *> res;
+  payloadOps.front()->walk([&](Operation *candidate) {
+    // Look for nested ops.
+    if (candidate == payloadOps.front())
+      return WalkResult::advance();
+
+    // If no constraints are specified, all ops are returned.
+    if (!body) {
+      res.push_back(candidate);
+      return WalkResult::advance();
+    }
+
+    // Include an op if is satisfies all constraints.
+    if (all_of(body->without_terminator(), [&](Operation &matchConstraintOp) {
+          return cast<MatchConstraintOpInterface>(&matchConstraintOp)
+              .satisfied(candidate);
+        }))
+      res.push_back(candidate);
+
+    return WalkResult::advance();
+  });
+
+  results.set(getResult().cast<OpResult>(), res);
+  return DiagnosedSilenceableFailure(success());
+}
+
+ParseResult transform_dialect::MatchOp::parse(OpAsmParser &parser,
+                                              OperationState &result) {
+  Type pdlOpType = parser.getBuilder().getType<pdl::OperationType>();
+  OpAsmParser::UnresolvedOperand matchedOpBbArg, targetOperand;
+  bool hasRegion = failed(parser.parseOptionalKeyword("within"));
+
+  if (hasRegion) {
+    if (parser.parseOperand(matchedOpBbArg) || parser.parseKeyword("within") ||
+        parser.parseOperand(targetOperand))
+      return failure();
+  } else {
+    if (parser.parseOperand(targetOperand)) return failure();
+  }
+
+  Region *body = result.addRegion();
+  if (hasRegion) {
+    if (parser.parseKeyword("where")) return failure();
+    SmallVector<OpAsmParser::Argument, 4> regionArgs;
+    auto &arg = regionArgs.emplace_back();
+    arg.ssaName = matchedOpBbArg;
+    arg.type = pdlOpType;
+    if (parser.parseRegion(*body, regionArgs)) return failure();
+  }
+
+  if (parser.parseOptionalAttrDict(result.attributes)) return failure();
+
+  if (parser.resolveOperand(targetOperand, pdlOpType, result.operands))
+    return failure();
+
+  result.addTypes(pdlOpType);
+  return success();
+}
+
+void transform_dialect::MatchOp::print(OpAsmPrinter &p) {
+  if (getBody()) {
+    p << " " << getMatchedOp() << " within " << getTarget() << " ";
+    p.printRegion(getConstraints(), /*printEntryBlockArgs=*/false);
+  } else {
+    p << " within " << getTarget();
+  }
+  p.printOptionalAttrDict(getOperation()->getAttrs());
+}
+
 LogicalResult transform_dialect::MatchOp::verify() {
+  if (getConstraints().getBlocks().size() > 1)
+    return this->emitOpError("must not have more than 1 block");
+  if (getBody()) {
+    if (!isa<transform_dialect::MatchTerminatorOp>(getBody()->getTerminator()))
+      return this->emitError("requires match.terminator terminator");
+    for (Operation &op : getBody()->without_terminator())
+      if (!isa<MatchConstraintOpInterface>(&op))
+        return op.emitError("body ops must be constraints");
+  }
+  return success();
+}
+
+//===---------------------------------------------------------------------===//
+// MatchIsAOp
+//===---------------------------------------------------------------------===//
+
+LogicalResult transform_dialect::MatchIsAOp::verify() {
   bool opXorIface = getMatchOp().hasValue() ^ getMatchInterface().hasValue();
   if (!opXorIface)
     return this->emitOpError(
@@ -186,99 +291,31 @@ LogicalResult transform_dialect::MatchOp::verify() {
   return success();
 }
 
-DiagnosedSilenceableFailure transform_dialect::MatchOp::apply(
-    transform::TransformResults &results, transform::TransformState &state) {
+bool transform_dialect::MatchIsAOp::satisfied(Operation *op) {
   llvm::StringSet<> strs;
   if (getMatchOp().hasValue())
     strs.insert(getMatchOp()->getAsValueRange<StringAttr>().begin(),
                 getMatchOp()->getAsValueRange<StringAttr>().end());
 
-  ArrayRef<Operation *> payloadOps = state.getPayloadOps(getTarget());
-  if (payloadOps.size() != 1)
-    return DiagnosedSilenceableFailure(
-        this->emitOpError("requires exactly one target handle"));
+  if (strs.contains(op->getName().getStringRef())) return true;
 
-  SmallVector<Operation *> res;
-
-  auto matchFun = [&](Operation *op) {
-    if (strs.contains(op->getName().getStringRef())) res.push_back(op);
-    // Interfaces cannot be matched by name, just by ID.
-    // So we specifically encode the interfaces we care about for this op.
-    if (getMatchInterface().hasValue()) {
-      auto iface = getMatchInterface().getValue();
-      if (iface == transform_dialect::MatchInterfaceEnum::LinalgOp &&
-          isa<linalg::LinalgOp>(op))
-        res.push_back(op);
-      if (iface == transform_dialect::MatchInterfaceEnum::TilingInterface &&
-          isa<TilingInterface>(op))
-        res.push_back(op);
-    }
-  };
-
-  payloadOps.front()->walk(matchFun);
-  results.set(getResult().cast<OpResult>(), res);
-  return DiagnosedSilenceableFailure(success());
-}
-
-ParseResult transform_dialect::MatchOp::parse(OpAsmParser &parser,
-                                              OperationState &result) {
-  // Parse 'match_op' or 'interface' clause.
-  if (succeeded(parser.parseOptionalKeyword("ops"))) {
-    ArrayAttr opsAttr;
-    if (parser.parseLBrace() ||
-        parser.parseCustomAttributeWithFallback(
-            opsAttr, parser.getBuilder().getType<NoneType>(), "match_op",
-            result.attributes) ||
-        parser.parseRBrace())
-      return failure();
-  } else if (succeeded(parser.parseOptionalKeyword("interface"))) {
-    if (parser.parseLBrace()) return failure();
-    StringRef attrStr;
-    auto loc = parser.getCurrentLocation();
-    if (parser.parseKeyword(&attrStr)) return failure();
-    auto interfaceEnum =
-        transform_dialect::symbolizeMatchInterfaceEnum(attrStr);
-    if (!interfaceEnum)
-      return parser.emitError(loc, "invalid ")
-             << "match_interface attribute specification: \"" << attrStr << '"';
-    transform_dialect::MatchInterfaceEnumAttr match_interfaceAttr =
-        transform_dialect::MatchInterfaceEnumAttr::get(
-            parser.getBuilder().getContext(), interfaceEnum.value());
-    result.addAttribute("match_interface", match_interfaceAttr);
-    if (parser.parseRBrace()) return failure();
-  } else {
-    auto loc = parser.getCurrentLocation();
-    return parser.emitError(loc, "expected ops or interface");
+  // Interfaces cannot be matched by name, just by ID.
+  // So we specifically encode the interfaces we care about for this op.
+  if (getMatchInterface().hasValue()) {
+    auto iface = getMatchInterface().getValue();
+    if (iface == transform_dialect::MatchInterfaceEnum::LinalgOp &&
+        isa<linalg::LinalgOp>(op))
+      return true;
+    if (iface == transform_dialect::MatchInterfaceEnum::TilingInterface &&
+        isa<TilingInterface>(op))
+      return true;
   }
 
-  OpAsmParser::UnresolvedOperand targetRawOperands[1];
-  ArrayRef<OpAsmParser::UnresolvedOperand> targetOperands(targetRawOperands);
-  if (parser.parseKeyword("in") || parser.parseOperand(targetRawOperands[0]) ||
-      parser.parseOptionalAttrDict(result.attributes))
-    return failure();
-  Type pdlOpType = parser.getBuilder().getType<pdl::OperationType>();
-  result.addTypes(pdlOpType);
-  if (parser.resolveOperands(targetOperands, pdlOpType, result.operands))
-    return failure();
-  return success();
-}
-
-void transform_dialect::MatchOp::print(OpAsmPrinter &p) {
-  if ((*this)->getAttr("match_op")) {
-    p << " ops{";
-    p.printAttributeWithoutType(getMatchOpAttr());
-    p << "}";
-  }
-  if ((*this)->getAttr("match_interface")) {
-    p << " interface{" << stringifyMatchInterfaceEnum(*getMatchInterface())
-      << "}";
-  }
-  p << " in " << getTarget();
-  p.printOptionalAttrDict((*this)->getAttrs(),
-                          /*elidedAttrs=*/{"match_op", "match_interface"});
+  return false;
 }
 
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsAttrs.cpp.inc"
+#include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsInterfaces.cpp.inc"
 
 #define GET_OP_CLASSES
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsOps.cpp.inc"

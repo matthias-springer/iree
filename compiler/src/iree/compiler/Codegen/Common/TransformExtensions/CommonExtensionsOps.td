@@ -4,8 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS
-#define IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS
+#ifndef IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONSOPS
+#define IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONSOPS
 
 include "mlir/Dialect/PDL/IR/PDLTypes.td"
 include "mlir/Dialect/Transform/IR/TransformDialect.td"
@@ -13,6 +13,7 @@ include "mlir/Dialect/Transform/IR/TransformInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/IR/OpBase.td"
+include "CommonExtensionsInterfaces.td"
 
 def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
     [FunctionalStyleTransformOpTrait, 
@@ -104,24 +105,41 @@ def MatchInterfaceEnum : I32EnumAttr<"MatchInterfaceEnum", "An interface to matc
   let cppNamespace = "::mlir::iree_compiler::IREE::transform_dialect";
 }
 
+// TODO: Should not implement TransformOpInterface and
+// MemoryEffectsOpInterface, but only ops that implement these interfaces
+// can be injected into the transform dialect.
+def MatchTerminatorOp : Op<Transform_Dialect, "iree.match.terminator",
+    [TransformOpInterface, MemoryEffectsOpInterface, Terminator]> {
+  let description = "terminator iree.match region";
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = [{attr-dict}];
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure apply(
+        ::mlir::transform::TransformResults &transformResults,
+        ::mlir::transform::TransformState &state) {
+      return ::mlir::DiagnosedSilenceableFailure::definiteFailure();
+    }
+
+    void getEffects(
+        SmallVectorImpl<::mlir::MemoryEffects::EffectInstance> &effects) {}
+  }];
+}
+
 def MatchOp : Op<Transform_Dialect, "iree.match",
-    [MemoryEffectsOpInterface,
+    [IsolatedFromAbove,
+     MemoryEffectsOpInterface,
      NavigationTransformOpTrait,
      DeclareOpInterfaceMethods<TransformOpInterface>]> {
   let description = [{
-    Match op with the specified constraints, within the target op.
-
-    The following constraints are supported:
-      - interface: an optional MatchInterfaceEnum specifying an enum
-      representation for an interface to target.
-      - ops: an optional StrArrayAttr specifying the concrete name of an op. 
-      
-      Note: either `ops` or `interface` must be specified.
-
-    Return modes:
-    =============
     This op traverses the ops nested under `target` and returns the handles to
-    all the operations that match the requirements.
+    all the operations that match the requirements. Only ops that satisfy all
+    constraints in the region body are matched.
+
+    All ops in the region body must implement the MatchConstraintOpInterface.
+    The region may be empty. In that case, all ops within the target op are
+    matched.
 
     This op fails if the target is not a handle to exactly one operation. 
     Otherwise it succeeds.
@@ -130,15 +148,68 @@ def MatchOp : Op<Transform_Dialect, "iree.match",
     it is a navigation op.
   }];
 
-  let arguments = (ins PDL_Operation:$target,
-                       OptionalAttr<StrArrayAttr>:$match_op,
-                       OptionalAttr<MatchInterfaceEnum>:$match_interface);
+  let arguments = (ins PDL_Operation:$target);
   // TODO: veriadic results when needed.
   let results = (outs PDL_Operation:$results);
+  let regions = (region AnyRegion:$constraints);
 
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    BlockArgument getMatchedOp() {
+      return getBody()->getArguments().front();
+    }
+
+    Block *getBody() {
+      if (getConstraints().getBlocks().empty())
+        return nullptr;
+      return &getConstraints().getBlocks().front();
+    }
+  }];
 }
 
-#endif // IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONS
+// TODO: Should not implement TransformOpInterface and
+// MemoryEffectsOpInterface, but only ops that implement these interfaces
+// can be injected into the transform dialect.
+def MatchIsAOp : Op<Transform_Dialect, "iree.match.isa",
+    [TransformOpInterface, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<MatchConstraintOpInterface>]> {
+  let description = [{
+    Constrains the name / interface of an op.
+
+    The following variants are supported:
+      - interface: an optional MatchInterfaceEnum specifying an enum
+      representation for an interface to target.
+      - ops: an optional StrArrayAttr specifying the concrete name of an op. 
+      
+    Note: either `ops` or `interface` must be specified.
+  }];
+
+  let arguments = (ins PDL_Operation:$target,
+                       OptionalAttr<StrArrayAttr>:$match_op,
+                       OptionalAttr<MatchInterfaceEnum>:$match_interface);
+  let results = (outs);
+  let assemblyFormat = [{
+    $target `,`
+    (`ops` `{` $match_op^ `}`)? 
+    (`interface` `{` $match_interface^ `}`)? 
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure apply(
+        ::mlir::transform::TransformResults &transformResults,
+        ::mlir::transform::TransformState &state) {
+      return ::mlir::DiagnosedSilenceableFailure::definiteFailure();
+    }
+
+    void getEffects(
+        SmallVectorImpl<::mlir::MemoryEffects::EffectInstance> &effects) {}
+  }];
+}
+#endif // IREE_COMPILER_CODEGEN_COMMON_TRANSFORMEXTENSIONS_COMMONEXTENSIONSOPS

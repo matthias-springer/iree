@@ -10,8 +10,22 @@
 #include "mlir/Dialect/PDL/IR/PDLTypes.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 
+namespace mlir {
+namespace iree_compiler {
+namespace IREE {
+namespace transform_dialect {
+namespace detail {
+LogicalResult verifyMatchConstraintOpInterface(Operation *op);
+} // namespace detail
+}  // namespace transform_dialect
+}  // namespace IREE
+}  // namespace iree_compiler
+}  // namespace mlir
+
 // Do not hoist this include!
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsAttrs.h.inc"
+
+#include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsInterfaces.h.inc"
 
 #define GET_OP_CLASSES
 #include "iree/compiler/Codegen/Common/TransformExtensions/CommonExtensionsOps.h.inc"
