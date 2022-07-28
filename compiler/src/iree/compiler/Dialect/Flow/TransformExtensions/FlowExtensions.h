@@ -20,6 +20,7 @@ class ForeachThreadOp;
 namespace iree_compiler {
 namespace IREE {
 namespace Flow {
+class DispatchRegionOp;
 class DispatchWorkgroupsOp;
 }  // namespace Flow
 }  // namespace IREE

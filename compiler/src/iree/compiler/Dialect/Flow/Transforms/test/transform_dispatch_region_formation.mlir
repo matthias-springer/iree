@@ -166,5 +166,6 @@ transform.with_pdl_patterns {
   transform.sequence %arg0 {
   ^bb1(%arg1: !pdl.operation):
     %dispatch_op = transform.iree.make_dispatch_regions %arg1
+    transform.iree.region_to_workgroups %dispatch_op
   }
 }

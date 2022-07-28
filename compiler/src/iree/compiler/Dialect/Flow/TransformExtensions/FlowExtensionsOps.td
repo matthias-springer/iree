@@ -77,6 +77,44 @@ def WrapInDispatchRegionOp : Op<
   }];
 }
 
+def FlowDispatchRegionToFlowDispatchWorkgroupsOp
+    : Op<Transform_Dialect, "iree.region_to_workgroups",
+        [FunctionalStyleTransformOpTrait,
+         TransformOpInterface, TransformEachOpTrait]> {
+  let description = [{
+    Rewrite `flow.dispatch.region` ops to `flow.dispatch.workgroups` ops.
+    The former ones allow arbitrary SSA values that are in scope to be captured
+    inside the body region, whereas the latter ones are isolated from above.
+
+    This transforms clones all ops in the `target` payload op body into a new
+    `workgroups` op. It analyzes which SSA values from outside the region are
+    used inside the region and passes them explicitly as operands. Inside the
+    region, they are accessed via block arguments. Tensor operands are wrapped
+    in `!flow.dispatch.tensor` types inside the `workgroups` op region.
+
+    #### Return modes
+
+    This operation consumes (reads and frees) the `target` handle. It produces
+    (allocates and writes) the result handle. All `target` payload ops must be
+    `flow.dispatch.region` ops, otherwise, the transform fails.
+   }];
+
+  let arguments = (ins Arg<PDL_Operation, "",
+                           [TransformMappingRead,
+                            TransformMappingFree]>:$target);
+  let results = (outs Res<PDL_Operation, "",
+                          [TransformMappingAlloc,
+                           TransformMappingWrite]>:$transformed);
+  let assemblyFormat = "$target attr-dict";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::iree_compiler::IREE::Flow::DispatchRegionOp target,
+        ::llvm::SmallVectorImpl<::mlir::Operation *> &results,
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
 def MoveIntoDispatchRegionOp : Op<
     Transform_Dialect, "iree.move_into_dispatch_region",
     [TransformOpInterface]> {
@@ -132,7 +170,7 @@ def MakeDispatchRegionsOp : Op<
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
   let extraClassDeclaration = [{
     ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformResults &transformResults, 
+        ::mlir::transform::TransformResults &transformResults,
         ::mlir::transform::TransformState &state);
   }];
 }
