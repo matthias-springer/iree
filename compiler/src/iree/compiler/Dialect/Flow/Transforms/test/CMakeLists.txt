@@ -40,6 +40,7 @@ iree_lit_test_suite(
     "pad_tensor_to_tensor.mlir"
     "strip_and_splat_constant_variables.mlir"
     "strip_signedness.mlir"
+    "transform_dispatch_region_formation.mlir"
     "transformation_pipeline.mlir"
     "verify_input_ir.mlir"
   TOOLS
