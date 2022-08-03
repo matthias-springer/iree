@@ -119,4 +119,22 @@ def MoveIntoDispatchRegionOp : Op<
   }];
 }
 
+def MakeDispatchRegionsOp : Op<
+    Transform_Dialect, "iree.make_dispatch_regions",
+    [TransformOpInterface]> {
+  let description = [{ Make dispatch regions }];
+  let arguments = (ins Arg<PDL_Operation, "",
+                           [TransformMappingRead]>:$target);
+  let results = (outs Res<PDL_Operation, "",
+                           [TransformMappingAlloc,
+                            TransformMappingWrite]>:$dispatch_region);
+  let assemblyFormat = "$target attr-dict";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+  let extraClassDeclaration = [{
+    ::mlir::DiagnosedSilenceableFailure apply(
+        ::mlir::transform::TransformResults &transformResults, 
+        ::mlir::transform::TransformState &state);
+  }];
+}
+
 #endif // IREE_COMPILER_DIALECT_FLOW_TRANSFORMEXTENSIONS_FLOWEXTENSIONS

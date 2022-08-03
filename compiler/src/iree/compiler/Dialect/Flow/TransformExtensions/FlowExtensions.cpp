@@ -6,10 +6,13 @@
 
 #include "FlowExtensions.h"
 
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/SimplePatternRewriter.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/DispatchLinalgOnTensors.h"
+#include "iree/compiler/Dialect/Flow/Transforms/FusionUtils.h"
 #include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BlockAndValueMapping.h"
@@ -717,22 +720,214 @@ static Flow::DispatchRegionOp makeEmptyDispatchRegion(RewriterBase &rewriter,
   return regionOp;
 }
 
+static FailureOr<Flow::DispatchRegionOp> wrapInDispatchRegion(
+    RewriterBase &rewriter, Operation *op) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  // Make an empty dispatch region right before the op.
+  rewriter.setInsertionPoint(op);
+  Flow::DispatchRegionOp regionOp =
+      makeEmptyDispatchRegion(rewriter, op->getLoc());
+  // Move the op into the dispatch region.
+  if (failed(moveIntoDispatchRegion(rewriter, op, regionOp))) return failure();
+  return regionOp;
+}
+
 DiagnosedSilenceableFailure
 transform_dialect::WrapInDispatchRegionOp::applyToOne(
     Operation *target, SmallVectorImpl<Operation *> &results,
     transform::TransformState &state) {
   IRRewriter rewriter(target->getContext());
-
-  // Make an empty dispatch region right before the target.
-  rewriter.setInsertionPoint(target);
-  Flow::DispatchRegionOp regionOp =
-      makeEmptyDispatchRegion(rewriter, target->getLoc());
-
-  // Move the target into the dispatch region.
-  if (failed(moveIntoDispatchRegion(rewriter, target, regionOp)))
+  auto maybeRegionOp = wrapInDispatchRegion(rewriter, target);
+  if (failed(maybeRegionOp))
     return DiagnosedSilenceableFailure(reportUnknownTransformError(target));
+  results.push_back(*maybeRegionOp);
+  return DiagnosedSilenceableFailure(success());
+}
 
-  results.push_back(regionOp);
+static LogicalResult fuseConsumers(RewriterBase &rewriter,
+                                   Flow::DispatchRegionOp &regionOp) {
+  while (regionOp->hasOneUse()) {
+    OpOperand &use = *regionOp->getUses().begin();
+    Operation *consumer = use.getOwner();
+    if (!isa<linalg::LinalgOp>(consumer)) break;
+    // TODO: IREE::Flow::areLinalgOpsFusableUsingTileAndFuse
+    if (failed(moveIntoDispatchRegion(rewriter, consumer, regionOp))) break;
+  }
+  return success();
+}
+
+static SmallVector<Operation *> getOpsInReverse(Block &block) {
+  return llvm::to_vector(
+      llvm::reverse(llvm::map_range(block, [](Operation &op) { return &op; })));
+}
+
+/// A rewriter that keeps track of ops that were deleted.
+class TrackingRewriter : public IRRewriter {
+ public:
+  using IRRewriter::IRRewriter;
+
+  bool wasOpDeleted(Operation *op) { return deletedOps.contains(op); }
+
+ protected:
+  void notifyOperationRemoved(Operation *op) override { deletedOps.insert(op); }
+
+ private:
+  llvm::DenseSet<Operation *> deletedOps;
+};
+
+static LogicalResult heuristicStage1(
+    TrackingRewriter &rewriter, Block &body,
+    SmallVector<Flow::DispatchRegionOp> &dispatchRegions) {
+  // Create dispatch regions for certain LinalgOps and tilable ops.
+  auto isRootOp = [](Operation *op) {
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+      if (isa<linalg::GenericOp>(op))
+        return linalgOp.getNumReductionLoops() != 0;
+      return !isa<linalg::FillOp>(op);
+    }
+    return isa<TilingInterface>(op);
+  };
+
+  SmallVector<Operation *> worklist = getOpsInReverse(body);
+  for (Operation *op : worklist) {
+    if (rewriter.wasOpDeleted(op)) continue;
+    if (op->getParentOfType<Flow::DispatchRegionOp>()) continue;
+    if (op->use_empty()) continue;
+    if (!isRootOp(op)) continue;
+
+    // TODO: Use DestinationStyleInterface when available upstream.
+    linalg::OpOperandVector outOperands =
+        TypeSwitch<Operation *, linalg::OpOperandVector>(op)
+            .Case<linalg::LinalgOp>([&](auto linalgOp) {
+              return linalgOp.getOutputTensorOperands();
+            })
+            .Default(
+                [&](Operation *) -> linalg::OpOperandVector { return {}; });
+
+    // Create a new dispatch region for `op`.
+    auto maybeRegionOp = wrapInDispatchRegion(rewriter, op);
+    if (failed(maybeRegionOp)) return failure();
+    Flow::DispatchRegionOp regionOp = *maybeRegionOp;
+
+    // Fuse producers into the dispatch region.
+    for (OpOperand *operand : outOperands) {
+      // Currently only fuse with producer ops that are `LinalgOp`s.
+      auto producer = operand->get().getDefiningOp<linalg::LinalgOp>();
+      if (!producer) continue;
+
+      // Fuse with the consumer if all uses of producer are dominated by it.
+      // TODO: clEnableMultiResultDispatches
+      if (!producer->hasOneUse()) continue;
+      if (producer.getNumLoops() != producer.getNumParallelLoops()) continue;
+
+      if (failed(moveIntoDispatchRegion(rewriter, producer, regionOp)))
+        return failure();
+    }
+
+    // Fuse consumers into the dispatch region.
+    if (failed(fuseConsumers(rewriter, regionOp))) return failure();
+
+    dispatchRegions.push_back(regionOp);
+  }
+
+  return success();
+}
+
+static LogicalResult heuristicStage2(
+    TrackingRewriter &rewriter, Block &body,
+    SmallVector<Flow::DispatchRegionOp> &dispatchRegions) {
+  SmallVector<Operation *> worklist = getOpsInReverse(body);
+  for (Operation *op : worklist) {
+    if (rewriter.wasOpDeleted(op)) continue;
+    // Target remaining LinalgOps that are not FillOps.
+    if (!isa<linalg::LinalgOp>(op) || isa<linalg::FillOp>(op)) continue;
+
+    // Create a new dispatch region for `op`.
+    auto maybeRegionOp = wrapInDispatchRegion(rewriter, op);
+    if (failed(maybeRegionOp)) return failure();
+    Flow::DispatchRegionOp regionOp = *maybeRegionOp;
+
+    // Fuse consumers into the dispatch region.
+    if (failed(fuseConsumers(rewriter, regionOp))) return failure();
+
+    dispatchRegions.push_back(regionOp);
+  }
+
+  return success();
+}
+
+static LogicalResult heuristicStage3(
+    TrackingRewriter &rewriter, Block &body,
+    SmallVector<Flow::DispatchRegionOp> &dispatchRegions) {
+  // For each dispatch region: Clone certain ops into the body.
+  for (Flow::DispatchRegionOp regionOp : dispatchRegions) {
+    // Find captured SSA values from parent blocks.
+    llvm::SetVector<Value> valuesDefinedAbove;
+    mlir::getUsedValuesDefinedAbove(regionOp.getBody(), valuesDefinedAbove);
+    SmallVector<Operation *> worklist;
+    for (Value v : valuesDefinedAbove)
+      if (Operation *op = v.getDefiningOp()) worklist.push_back(op);
+
+    // Check each op.
+    while (!worklist.empty()) {
+      Operation *op = worklist.pop_back_val();
+      if (rewriter.wasOpDeleted(op)) continue;
+      if (!isa<arith::IndexCastOp, linalg::InitTensorOp, tensor::CastOp,
+               tensor::ExtractOp, tensor::ExtractSliceOp, tensor::PadOp,
+               arith::ConstantOp>(op))
+        continue;
+      if (failed(moveIntoDispatchRegion(rewriter, op, regionOp)))
+        return failure();
+      for (Value v : op->getOperands())
+        if (Operation *op = v.getDefiningOp()) worklist.push_back(op);
+    }
+  }
+  return success();
+}
+
+static FailureOr<SmallVector<Flow::DispatchRegionOp>> makeDispatchRegions(
+    Block &body) {
+  TrackingRewriter rewriter(body.getParentOp()->getContext());
+  SmallVector<Flow::DispatchRegionOp> dispatchRegions;
+
+  if (failed(heuristicStage1(rewriter, body, dispatchRegions)))
+    return failure();
+
+  if (failed(heuristicStage2(rewriter, body, dispatchRegions)))
+    return failure();
+
+  if (failed(heuristicStage3(rewriter, body, dispatchRegions)))
+    return failure();
+
+  return dispatchRegions;
+}
+
+DiagnosedSilenceableFailure transform_dialect::MakeDispatchRegionsOp::apply(
+    transform::TransformResults &transformResults,
+    transform::TransformState &state) {
+  ArrayRef<Operation *> targetOps = state.getPayloadOps(getTarget());
+  if (targetOps.size() != 1)
+    return DiagnosedSilenceableFailure(
+        this->emitOpError("requires exactly one target handle"));
+
+  SmallVector<Operation *> dispatchRegions;
+  auto moduleOp = cast<ModuleOp>(targetOps.front());
+  auto walkResult = moduleOp.walk([&](FunctionOpInterface funcOp) {
+    for (Block &block : funcOp.getBody()) {
+      auto maybeRegionOps = makeDispatchRegions(block);
+      if (failed(maybeRegionOps)) return WalkResult::interrupt();
+      auto regionOps =
+          llvm::map_range(*maybeRegionOps, [](Flow::DispatchRegionOp regionOp) {
+            return regionOp.getOperation();
+          });
+      dispatchRegions.append(regionOps.begin(), regionOps.end());
+    }
+    return WalkResult::advance();
+  });
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure(failure());
+
+  transformResults.set(getDispatchRegion().cast<OpResult>(), dispatchRegions);
   return DiagnosedSilenceableFailure(success());
 }
 
