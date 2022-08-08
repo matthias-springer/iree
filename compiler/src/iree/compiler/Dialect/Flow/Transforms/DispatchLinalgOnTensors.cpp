@@ -452,7 +452,7 @@ static SmallVector<Operation *> getOperationsToMoveIntoDispatch(
 
 /// Reorders the operations in `ops` such that they could be inlined into the
 /// dispatch region in that order to satisfy dependencies.
-static SmallVector<Operation *> orderOperations(ArrayRef<Operation *> ops) {
+SmallVector<Operation *> orderOperations(ArrayRef<Operation *> ops) {
   LLVM_DEBUG({
     llvm::dbgs() << "Ops to be inlined :\n";
     for (auto op : ops) {
