@@ -232,31 +232,23 @@ static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> createFusionGroups(
     DominanceInfo const &dominanceInfo, bool generateWorkloadRegion,
     bool aggressiveFusion) {
   // Decide fusion groups (heuristic).
-  unsigned numRoots =
+  FusionGroupMapping fusionGroups =
       decideFusableLinalgOps(funcOp, dominanceInfo, aggressiveFusion);
-  SmallVector<Operation *> roots(numRoots, nullptr);
-  DenseMap<unsigned, SmallVector<Operation *>> producers;
-
-  // TODO: Incrementally add ops to an empty DispatchGroupOp instead of
-  // annotating fusion group IDs via attributes.
-  funcOp.walk([&](Operation *op) {
-    if (hasRootOpAttribute(op)) roots[getRootNumber(op)] = op;
-    if (hasFusionGroupAttribute(op)) {
-      producers[getFusionGroup(op)].push_back(op);
-    }
-  });
 
   // Create a DispatchRegionOp for every fusion group.
   OpBuilder::InsertionGuard g(rewriter);
   SmallVector<Flow::DispatchRegionOp> regionOps;
   DenseMap<Flow::DispatchRegionOp, SmallVector<Value>> workloads;
-  for (const auto &it : llvm::enumerate(roots)) {
+  for (const auto &it : fusionGroups) {
+    Operation *rootOp = it.first;
+    SmallVector<Operation *> producers = it.second;
+
     // Compute workload.
     SmallVector<Value> workload;
     if (generateWorkloadRegion) {
-      rewriter.setInsertionPoint(it.value());
+      rewriter.setInsertionPoint(rootOp);
       FailureOr<SmallVector<Value>> maybeWorkload =
-          getWorkloadForRootOp(rewriter, it.value());
+          getWorkloadForRootOp(rewriter, rootOp);
       if (failed(maybeWorkload)) return failure();
       workload = *maybeWorkload;
     }
@@ -267,7 +259,7 @@ static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> createFusionGroups(
 
     // Create fusion group.
     Flow::DispatchRegionOp regionOp;
-    auto maybeRegionOp = Flow::wrapOpInDispatchRegion(rewriter, it.value());
+    auto maybeRegionOp = Flow::wrapOpInDispatchRegion(rewriter, rootOp);
     if (failed(maybeRegionOp)) return failure();
     regionOp = *maybeRegionOp;
     workloads[regionOp] = workload;
@@ -277,7 +269,7 @@ static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> createFusionGroups(
     // TODO: Use mlir::computeTopologicalSorting. This is currently not possible
     // because some of the producers are in different blocks.
     SmallVector<Operation *> orderedProducers =
-        Flow::orderOperations(producers[it.index()]);
+        Flow::orderOperations(producers);
 
     // Move ops into the region.
     for (Operation *producer : llvm::reverse(orderedProducers)) {
@@ -444,8 +436,6 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
 
   // Finally walk all the ops and remove the attributes
   funcOp.walk([](Operation *op) {
-    removeFusionGroupAttribute(op);
-    removeRootOpAttribute(op);
     op->removeAttr(linalg::LinalgTransforms::kLinalgTransformMarker);
   });
 }

@@ -7,6 +7,10 @@
 #ifndef IREE_COMPILER_DIALECT_FLOW_TRANSFORMS_DISPATCHREGIONHEURISTIC_H_
 #define IREE_COMPILER_DIALECT_FLOW_TRANSFORMS_DISPATCHREGIONHEURISTIC_H_
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/IR/FunctionInterfaces.h"
+
 namespace mlir {
 class DominanceInfo;
 class Operation;
@@ -15,32 +19,20 @@ namespace iree_compiler {
 namespace IREE {
 namespace Flow {
 
-/// Returns true if an op has a root operation.
-bool hasRootOpAttribute(Operation *op);
+/// Mapping of root op to other ops that are in the same fusion group.
+using FusionGroupMapping =
+    llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>>;
 
-/// Removes root attribute. Asserts if root attribute is not present.
-void removeRootOpAttribute(Operation *op);
+bool isFusionGroupRoot(const FusionGroupMapping &mapping, Operation *op);
 
-/// Returns the number of the root. Asserts if the operation is not already set
-/// as a root.
-int64_t getRootNumber(Operation *op);
-
-/// Returns true if an op is part of a fusion group.
-bool hasFusionGroupAttribute(Operation *op);
-
-/// Returns the fusion group for the given `op`.
-int64_t getFusionGroup(Operation *op);
-
-/// Returns true if the given `op` is in the `targetGroup` fusion group.
-bool isInFusionGroup(Operation *op, int64_t targetGroup);
-
-/// Removes the fusion group attribute.
-void removeFusionGroupAttribute(Operation *op);
+/// Returns root op of the fusion group that `op` is contained in.
+Operation *getRootOfContainingFusionGroup(const FusionGroupMapping &mapping,
+                                          Operation *op);
 
 /// Determine fusion groups.
-unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
-                                DominanceInfo const &dominanceInfo,
-                                bool aggressiveFusion);
+FusionGroupMapping decideFusableLinalgOps(FunctionOpInterface funcOp,
+                                          DominanceInfo const &dominanceInfo,
+                                          bool aggressiveFusion);
 
 /// A heuristic that decides which ops should be cloned and fused into a
 /// dispatch region.

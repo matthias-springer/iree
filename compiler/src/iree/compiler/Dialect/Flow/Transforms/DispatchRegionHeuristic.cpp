@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Dialect/Flow/Transforms/DispatchRegionHeuristic.h"
+
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowTypes.h"
@@ -39,58 +41,16 @@ namespace Flow {
 // Root and fusion group attribute handling
 //===----------------------------------------------------------------------===//
 
-/// Returns true if an op has a root operation.
-bool hasRootOpAttribute(Operation *op) {
-  return static_cast<bool>(op->getAttrOfType<IntegerAttr>(kRootOpAttr));
+/// Returns root op of the fusion group that `op` is contained in.
+Operation *getRootOfContainingFusionGroup(const FusionGroupMapping &mapping,
+                                          Operation *op) {
+  for (const auto &it : mapping)
+    if (llvm::find(it.second, op) != it.second.end()) return it.first;
+  return nullptr;
 }
 
-/// Removes root attribute. Asserts if root attribute is not present.
-void removeRootOpAttribute(Operation *op) { op->removeAttr(kRootOpAttr); }
-
-/// Sets the root attribute for an operation. The root attribute needs a number
-/// to identify the root. Asserts if root attribute is already set on an
-/// operation.
-static void setRootAttribute(MLIRContext *context, Operation *op,
-                             int64_t rootNumber) {
-  assert(!op->hasAttr(kRootOpAttr) &&
-         "invalid to update root attribute on an op");
-  op->setAttr(kRootOpAttr,
-              IntegerAttr::get(IntegerType::get(context, 64), rootNumber));
-}
-
-/// Returns the number of the root. Asserts if the operation is not already set
-/// as a root.
-int64_t getRootNumber(Operation *op) {
-  return op->getAttrOfType<IntegerAttr>(kRootOpAttr).getInt();
-}
-
-/// Returns true if an op is part of a fusion group.
-bool hasFusionGroupAttribute(Operation *op) {
-  return static_cast<bool>(op->getAttrOfType<IntegerAttr>(kFusionGroupAttr));
-}
-
-/// Returns the fusion group for the given `op`.
-int64_t getFusionGroup(Operation *op) {
-  auto attr = op->getAttrOfType<IntegerAttr>(kFusionGroupAttr);
-  assert(attr && "expected fusion group attr");
-  return attr.getInt();
-}
-
-/// Appends the given `op` to the `groupNumber` fusion group.
-static void setFusionGroup(Operation *op, int64_t groupNumber) {
-  assert(!hasFusionGroupAttribute(op) && "op already has fusion group attr");
-  op->setAttr(kFusionGroupAttr, Builder(op).getI64IntegerAttr(groupNumber));
-}
-
-/// Returns true if the given `op` is in the `targetGroup` fusion group.
-bool isInFusionGroup(Operation *op, int64_t targetGroup) {
-  if (!hasFusionGroupAttribute(op)) return false;
-  return getFusionGroup(op) == targetGroup;
-}
-
-/// Removes the fusion group attribute.
-void removeFusionGroupAttribute(Operation *op) {
-  op->removeAttr(kFusionGroupAttr);
+bool isFusionGroupRoot(const FusionGroupMapping &mapping, Operation *op) {
+  return mapping.find(op) != mapping.end();
 }
 
 //===----------------------------------------------------------------------===//
@@ -363,7 +323,7 @@ static bool isFusableWithConsumer(OpOperand &fusedOperand,
 
 /// Fuses roots with its consumers. If a root is fused with its consumer, it is
 /// no more tagged as a root to aid with the dispatch region formation.
-static void fuseRootsWithConsumers(MLIRContext *context,
+static void fuseRootsWithConsumers(FusionGroupMapping &mapping,
                                    ArrayRef<Operation *> roots,
                                    DominanceInfo const &dominanceInfo,
                                    bool aggressiveFusion) {
@@ -371,16 +331,14 @@ static void fuseRootsWithConsumers(MLIRContext *context,
   // Fuse with consumers where possible.
   while (!workList.empty()) {
     Operation *currRoot = workList.pop_back_val();
-    assert(hasRootOpAttribute(currRoot) &&
+    assert(isFusionGroupRoot(mapping, currRoot) &&
            "unexpected non-root op in worklist");
 
     // Helper function to make the consumer the root instead of the producer
     // when they are to be fused.
-    auto updateRootTo = [&context, &currRoot](Operation *newRoot) {
-      int64_t rootNumber = getRootNumber(currRoot);
-      setRootAttribute(context, newRoot, rootNumber);
-      removeRootOpAttribute(currRoot);
-      setFusionGroup(currRoot, rootNumber);
+    auto updateRootTo = [&mapping, &currRoot](Operation *newRoot) {
+      mapping[newRoot] = mapping[currRoot];
+      mapping[newRoot].push_back(currRoot);
     };
 
     Optional<OpOperand *> fusableUse = getFusableUse(
@@ -389,9 +347,9 @@ static void fuseRootsWithConsumers(MLIRContext *context,
 
     // Analyse the use to see if it is fusable.
     Operation *consumerOp = fusableUse.value()->getOwner();
-    if (hasRootOpAttribute(consumerOp) || hasFusionGroupAttribute(consumerOp)) {
+    if (isFusionGroupRoot(mapping, consumerOp) ||
+        getRootOfContainingFusionGroup(mapping, consumerOp))
       continue;
-    }
 
     if (isFusableWithConsumer(*(fusableUse.value()), aggressiveFusion)) {
       updateRootTo(consumerOp);
@@ -427,8 +385,7 @@ static bool isFusableWithProducer(OpOperand &operand, bool aggressiveFusion) {
 
 /// Starting from the `root` op, traverse the operand use-def chain
 /// in reverse to fuse with producers.
-static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
-                                   unsigned groupNum,
+static void fuseRootsWithProducers(FusionGroupMapping &mapping, Operation *root,
                                    DominanceInfo const &dominanceInfo,
                                    bool aggressiveFusion) {
   SmallVector<Operation *> worklist;
@@ -439,9 +396,11 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
     for (OpOperand &operand : candidate->getOpOperands()) {
       Operation *producer = operand.get().getDefiningOp();
       if (!producer) continue;
-      if (hasFusionGroupAttribute(producer) || hasRootOpAttribute(producer)) {
+      // Continue if producer is already in a fusion group or is the root of a
+      // fusion group.
+      if (getRootOfContainingFusionGroup(mapping, producer) ||
+          isFusionGroupRoot(mapping, producer))
         continue;
-      }
 
       Optional<OpOperand *> fusableUse = getFusableUse(
           producer, dominanceInfo, /*fuseMultiUse=*/aggressiveFusion);
@@ -449,7 +408,7 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
 
       if (!isFusableWithProducer(operand, aggressiveFusion)) continue;
 
-      setFusionGroup(producer, groupNum);
+      mapping[root].push_back(producer);
       worklist.push_back(producer);
     }
   }
@@ -463,10 +422,10 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
 /// be marked to fuse with multiple root operations (i.e. replicated). For now a
 /// very simple heuristic is used below, but the mechanism should be general
 /// enough to capture any heuristic.
-unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
-                                DominanceInfo const &dominanceInfo,
-                                bool aggressiveFusion) {
-  unsigned numRootOps = 0;
+FusionGroupMapping decideFusableLinalgOps(FunctionOpInterface funcOp,
+                                          DominanceInfo const &dominanceInfo,
+                                          bool aggressiveFusion) {
+  FusionGroupMapping mapping;
   MLIRContext *context = funcOp->getContext();
   OpBuilder builder(context);
   for (Block &block : funcOp.getFunctionBody()) {
@@ -478,16 +437,14 @@ unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
     SmallVector<Operation *> roots;
     for (Operation &op : llvm::reverse(block)) {
       // Start with a root operation and fuse its producers.
-      if (hasFusionGroupAttribute(&op) || !isRootOp(&op)) continue;
-      unsigned newGroup = numRootOps++;
-      setRootAttribute(context, &op, newGroup);
-
-      fuseRootsWithProducers(context, &op, newGroup, dominanceInfo,
-                             aggressiveFusion);
+      if (getRootOfContainingFusionGroup(mapping, &op) || !isRootOp(&op))
+        continue;
+      mapping[&op] = SmallVector<Operation *>();
+      fuseRootsWithProducers(mapping, &op, dominanceInfo, aggressiveFusion);
       roots.push_back(&op);
     }
     roots = llvm::to_vector(llvm::reverse(roots));
-    fuseRootsWithConsumers(context, roots, dominanceInfo, aggressiveFusion);
+    fuseRootsWithConsumers(mapping, roots, dominanceInfo, aggressiveFusion);
   }
 
   // Once all root linalg ops have been tagged, put all remaining generic ops
@@ -496,21 +453,22 @@ unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
     SmallVector<Operation *> roots;
     for (Operation &op : llvm::reverse(block)) {
       // If it is part of a fusion group or root op, ignore it.
-      if (hasFusionGroupAttribute(&op) || hasRootOpAttribute(&op)) continue;
+      if (getRootOfContainingFusionGroup(mapping, &op) ||
+          isFusionGroupRoot(mapping, &op))
+        continue;
       // Only look for Linalg ops here. Avoid moving `linalg.fill` that aren't
       // fused with anything else into their own dispatches since it is better
       // to convert them to splats.
       if (!isa<linalg::LinalgOp>(op) || isa<linalg::FillOp>(op)) continue;
 
-      unsigned newGroup = numRootOps++;
-      setRootAttribute(context, &op, newGroup);
+      mapping[&op] = SmallVector<Operation *>();
       roots.push_back(&op);
     }
     roots = llvm::to_vector(llvm::reverse(roots));
-    fuseRootsWithConsumers(context, roots, dominanceInfo, aggressiveFusion);
+    fuseRootsWithConsumers(mapping, roots, dominanceInfo, aggressiveFusion);
   }
 
-  return numRootOps;
+  return mapping;
 }
 
 }  // namespace Flow
