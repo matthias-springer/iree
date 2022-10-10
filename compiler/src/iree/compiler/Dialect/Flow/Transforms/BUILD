@@ -43,6 +43,7 @@ iree_compiler_cc_library(
         "DetachElementwiseFromNamedOps.cpp",
         "DispatchLinalgOnTensors.cpp",
         "DispatchLinalgOnTensorsViaRegionOps.cpp",
+        "DispatchRegionHeuristic.cpp",
         "DispatchWithTransformDialect.cpp",
         "DumpDispatchGraph.cpp",
         "ExpandTensorShapes.cpp",
@@ -67,7 +68,7 @@ iree_compiler_cc_library(
     ],
     hdrs = [
         "ConvertRegionToWorkgroups.h",
-        "DispatchLinalgOnTensors.h",
+        "DispatchRegionHeuristic.h",
         "Passes.h",
         "Passes.h.inc",
         "RegionOpUtils.h",
