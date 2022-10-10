@@ -40,7 +40,6 @@ iree_cc_library(
     "DeduplicateExecutables.cpp"
     "DetachElementwiseFromNamedOps.cpp"
     "DispatchLinalgOnTensors.cpp"
-    "DispatchLinalgOnTensorsViaRegionOps.cpp"
     "DispatchRegionHeuristic.cpp"
     "DispatchWithTransformDialect.cpp"
     "DumpDispatchGraph.cpp"
