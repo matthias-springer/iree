@@ -26,16 +26,16 @@ void removeRootOpAttribute(Operation *op);
 int64_t getRootNumber(Operation *op);
 
 /// Returns true if an op is part of a fusion group.
-bool hasFusionGroupsAttribute(Operation *op);
+bool hasFusionGroupAttribute(Operation *op);
 
-/// Returns the fusion groups for the given `op`.
-SmallVector<int64_t, 1> getFusionGroups(Operation *op);
+/// Returns the fusion group for the given `op`.
+int64_t getFusionGroup(Operation *op);
 
 /// Returns true if the given `op` is in the `targetGroup` fusion group.
-bool isInFusionGroup(Operation *op, unsigned targetGroup);
+bool isInFusionGroup(Operation *op, int64_t targetGroup);
 
-/// Removes the fusion groups attribute.
-void removeFusionGroupsAttribute(Operation *op);
+/// Removes the fusion group attribute.
+void removeFusionGroupAttribute(Operation *op);
 
 /// Determine fusion groups.
 unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,

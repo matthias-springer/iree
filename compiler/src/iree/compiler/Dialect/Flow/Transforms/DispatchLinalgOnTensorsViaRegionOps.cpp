@@ -240,9 +240,8 @@ static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> createFusionGroups(
   // annotating fusion group IDs via attributes.
   funcOp.walk([&](Operation *op) {
     if (hasRootOpAttribute(op)) roots[getRootNumber(op)] = op;
-    if (hasFusionGroupsAttribute(op)) {
-      assert(getFusionGroups(op).size() == 1 && "expected exactly one group");
-      producers[getFusionGroups(op).front()].push_back(op);
+    if (hasFusionGroupAttribute(op)) {
+      producers[getFusionGroup(op)].push_back(op);
     }
   });
 
@@ -441,7 +440,7 @@ void DispatchLinalgOnTensorsViaRegionOpsPass::runOnOperation() {
 
   // Finally walk all the ops and remove the attributes
   funcOp.walk([](Operation *op) {
-    removeFusionGroupsAttribute(op);
+    removeFusionGroupAttribute(op);
     removeRootOpAttribute(op);
     op->removeAttr(linalg::LinalgTransforms::kLinalgTransformMarker);
   });

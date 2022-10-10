@@ -28,7 +28,7 @@ static llvm::cl::opt<int> clInlineConstantByteLength(
     llvm::cl::init(256));
 
 static const char kRootOpAttr[] = "__root_op__";
-static const char kFusionGroupsAttr[] = "__fused_op__";
+static const char kFusionGroupAttr[] = "__fused_op__";
 
 namespace mlir {
 namespace iree_compiler {
@@ -65,41 +65,32 @@ int64_t getRootNumber(Operation *op) {
 }
 
 /// Returns true if an op is part of a fusion group.
-bool hasFusionGroupsAttribute(Operation *op) {
-  return static_cast<bool>(op->getAttrOfType<ArrayAttr>(kFusionGroupsAttr));
+bool hasFusionGroupAttribute(Operation *op) {
+  return static_cast<bool>(op->getAttrOfType<IntegerAttr>(kFusionGroupAttr));
 }
 
-/// Returns the fusion groups for the given `op`.
-SmallVector<int64_t, 1> getFusionGroups(Operation *op) {
-  SmallVector<int64_t, 1> fusionGroups = {};
-  if (auto fusionGroupsAttr = op->getAttrOfType<ArrayAttr>(kFusionGroupsAttr)) {
-    fusionGroups = llvm::to_vector<1>(llvm::map_range(
-        fusionGroupsAttr,
-        [](Attribute attr) { return attr.cast<IntegerAttr>().getInt(); }));
-  }
-  return fusionGroups;
+/// Returns the fusion group for the given `op`.
+int64_t getFusionGroup(Operation *op) {
+  auto attr = op->getAttrOfType<IntegerAttr>(kFusionGroupAttr);
+  assert(attr && "expected fusion group attr");
+  return attr.getInt();
 }
 
-/// Appends the given `op` to the `newGroups` fusion groups.
-static void appendToFusionGroup(Operation *op, ArrayRef<int64_t> newGroups) {
-  SmallVector<int64_t, 1> fusionGroups = getFusionGroups(op);
-  fusionGroups.append(newGroups.begin(), newGroups.end());
-  op->setAttr(kFusionGroupsAttr, Builder(op).getI64ArrayAttr(fusionGroups));
+/// Appends the given `op` to the `groupNumber` fusion group.
+static void setFusionGroup(Operation *op, int64_t groupNumber) {
+  assert(!hasFusionGroupAttribute(op) && "op already has fusion group attr");
+  op->setAttr(kFusionGroupAttr, Builder(op).getI64IntegerAttr(groupNumber));
 }
 
 /// Returns true if the given `op` is in the `targetGroup` fusion group.
-bool isInFusionGroup(Operation *op, unsigned targetGroup) {
-  if (ArrayAttr opGroupAttr = op->getAttrOfType<ArrayAttr>(kFusionGroupsAttr)) {
-    return llvm::any_of(opGroupAttr, [&targetGroup](Attribute attr) {
-      return attr.cast<IntegerAttr>().getInt() == targetGroup;
-    });
-  }
-  return false;
+bool isInFusionGroup(Operation *op, int64_t targetGroup) {
+  if (!hasFusionGroupAttribute(op)) return false;
+  return getFusionGroup(op) == targetGroup;
 }
 
-/// Removes the fusion groups attribute.
-void removeFusionGroupsAttribute(Operation *op) {
-  op->removeAttr(kFusionGroupsAttr);
+/// Removes the fusion group attribute.
+void removeFusionGroupAttribute(Operation *op) {
+  op->removeAttr(kFusionGroupAttr);
 }
 
 //===----------------------------------------------------------------------===//
@@ -389,7 +380,7 @@ static void fuseRootsWithConsumers(MLIRContext *context,
       int64_t rootNumber = getRootNumber(currRoot);
       setRootAttribute(context, newRoot, rootNumber);
       removeRootOpAttribute(currRoot);
-      appendToFusionGroup(currRoot, rootNumber);
+      setFusionGroup(currRoot, rootNumber);
     };
 
     Optional<OpOperand *> fusableUse = getFusableUse(
@@ -398,8 +389,7 @@ static void fuseRootsWithConsumers(MLIRContext *context,
 
     // Analyse the use to see if it is fusable.
     Operation *consumerOp = fusableUse.value()->getOwner();
-    if (hasRootOpAttribute(consumerOp) ||
-        hasFusionGroupsAttribute(consumerOp)) {
+    if (hasRootOpAttribute(consumerOp) || hasFusionGroupAttribute(consumerOp)) {
       continue;
     }
 
@@ -449,7 +439,7 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
     for (OpOperand &operand : candidate->getOpOperands()) {
       Operation *producer = operand.get().getDefiningOp();
       if (!producer) continue;
-      if (hasFusionGroupsAttribute(producer) || hasRootOpAttribute(producer)) {
+      if (hasFusionGroupAttribute(producer) || hasRootOpAttribute(producer)) {
         continue;
       }
 
@@ -459,7 +449,7 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
 
       if (!isFusableWithProducer(operand, aggressiveFusion)) continue;
 
-      appendToFusionGroup(producer, groupNum);
+      setFusionGroup(producer, groupNum);
       worklist.push_back(producer);
     }
   }
@@ -469,7 +459,7 @@ static void fuseRootsWithProducers(MLIRContext *context, Operation *root,
 /// using tile + fuse. Using some heuristic, each root operation is tagged with
 /// an ID (using an IntegerAttr with name `kRootOpAttr`) and all dispatchable
 /// ops to be fused with it is tagged with the same ID (using a list of
-/// IntegerAttr with name `kFusionGroupsAttr`). Each dispatchable operation can
+/// IntegerAttr with name `kFusionGroupAttr`). Each dispatchable operation can
 /// be marked to fuse with multiple root operations (i.e. replicated). For now a
 /// very simple heuristic is used below, but the mechanism should be general
 /// enough to capture any heuristic.
@@ -488,7 +478,7 @@ unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
     SmallVector<Operation *> roots;
     for (Operation &op : llvm::reverse(block)) {
       // Start with a root operation and fuse its producers.
-      if (hasFusionGroupsAttribute(&op) || !isRootOp(&op)) continue;
+      if (hasFusionGroupAttribute(&op) || !isRootOp(&op)) continue;
       unsigned newGroup = numRootOps++;
       setRootAttribute(context, &op, newGroup);
 
@@ -506,7 +496,7 @@ unsigned decideFusableLinalgOps(FunctionOpInterface funcOp,
     SmallVector<Operation *> roots;
     for (Operation &op : llvm::reverse(block)) {
       // If it is part of a fusion group or root op, ignore it.
-      if (hasFusionGroupsAttribute(&op) || hasRootOpAttribute(&op)) continue;
+      if (hasFusionGroupAttribute(&op) || hasRootOpAttribute(&op)) continue;
       // Only look for Linalg ops here. Avoid moving `linalg.fill` that aren't
       // fused with anything else into their own dispatches since it is better
       // to convert them to splats.

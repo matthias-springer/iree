@@ -752,7 +752,7 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
 
   // Finally walk all the ops and remove the attributes
   funcOp.walk([](Operation *op) {
-    removeFusionGroupsAttribute(op);
+    removeFusionGroupAttribute(op);
     removeRootOpAttribute(op);
     op->removeAttr(linalg::LinalgTransforms::kLinalgTransformMarker);
   });
