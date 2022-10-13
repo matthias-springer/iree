@@ -8,16 +8,16 @@
 from e2e_test_framework import unique_ids
 from e2e_test_framework.definitions import common_definitions
 
-DEEPLABV3_FP32 = common_definitions.Model(
-    id=unique_ids.MODEL_DEEPLABV3_FP32,
-    name="DeepLabV3_fp32",
-    tags=["fp32"],
-    source_type=common_definitions.ModelSourceType.EXPORTED_TFLITE,
-    # Mirror of https://tfhub.dev/tensorflow/lite-model/deeplabv3/1/default/1
-    source_url=
-    "https://storage.googleapis.com/iree-model-artifacts/deeplabv3.tflite",
-    entry_function="main",
-    input_types=["1x257x257x3xf32"])
+#DEEPLABV3_FP32 = common_definitions.Model(
+#    id=unique_ids.MODEL_DEEPLABV3_FP32,
+#    name="DeepLabV3_fp32",
+#    tags=["fp32"],
+#    source_type=common_definitions.ModelSourceType.EXPORTED_TFLITE,
+#    # Mirror of https://tfhub.dev/tensorflow/lite-model/deeplabv3/1/default/1
+#    source_url=
+#    "https://storage.googleapis.com/iree-model-artifacts/deeplabv3.tflite",
+#    entry_function="main",
+#    input_types=["1x257x257x3xf32"])
 
 MOBILESSD_FP32 = common_definitions.Model(
     id=unique_ids.MODEL_MOBILESSD_FP32,

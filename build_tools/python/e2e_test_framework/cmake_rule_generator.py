@@ -214,6 +214,11 @@ class IreeRuleFactory(object):
         mlir_dialect_type=model_import_rule.mlir_dialect_type
     ) + compile_config.extra_flags
 
+    compile_flags += [
+      "--iree-flow-dump-dispatch-graph",
+      f"--iree-flow-dump-dispatch-graph-output-file={output_path}.dot"
+    ]
+
     cmake_rule = (f'# Compile the module "{output_path}"\n' +
                   cmake_builder.rules.build_iree_bytecode_module(
                       target_name=target_name,

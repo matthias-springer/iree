@@ -9,7 +9,7 @@ from e2e_test_framework.models import tf_models, tflite_models
 
 # Small models that require less computational resources.
 SMALL = [
-    tflite_models.DEEPLABV3_FP32,
+    #tflite_models.DEEPLABV3_FP32,
     tflite_models.MOBILESSD_FP32,
     tflite_models.POSENET_FP32,
     tflite_models.MOBILEBERT_FP32,

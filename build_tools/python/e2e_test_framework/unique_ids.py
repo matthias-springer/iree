@@ -9,7 +9,7 @@ Each ID should be generated from uuid.uuid4().
 """
 
 # Models
-MODEL_DEEPLABV3_FP32 = "c36c63b0-220a-4d78-8ade-c45ce47d89d3"
+#MODEL_DEEPLABV3_FP32 = "c36c63b0-220a-4d78-8ade-c45ce47d89d3"
 MODEL_MOBILESSD_FP32 = "0e466f69-91d6-4e50-b62b-a82b6213a231"
 MODEL_POSENET_FP32 = "5afc3014-d29d-4e88-a840-fbaf678acf2b"
 MODEL_MOBILEBERT_FP32 = "cc69d69f-6d1f-4a1a-a31e-e021888d0d28"

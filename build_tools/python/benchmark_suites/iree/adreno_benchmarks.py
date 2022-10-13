@@ -43,7 +43,7 @@ class Android_Adreno_Benchmarks(object):
   ) -> Tuple[List[iree_definitions.ModuleGenerationConfig],
              List[iree_definitions.E2EModelRunConfig]]:
     default_models = [
-        tflite_models.DEEPLABV3_FP32,
+        #tflite_models.DEEPLABV3_FP32,
         tflite_models.MOBILESSD_FP32,
         tflite_models.POSENET_FP32,
         tflite_models.MOBILEBERT_FP32,

@@ -23,7 +23,7 @@ class Linux_RV64_Benchmarks(object):
       tags=["default-flags"],
       compile_targets=[RV64_CPU_TARGET])
   MODELS = [
-      tflite_models.DEEPLABV3_FP32,
+      #tflite_models.DEEPLABV3_FP32,
       tflite_models.MOBILEBERT_FP32,
       tflite_models.MOBILENET_V1,
       tflite_models.MOBILEBERT_INT8,

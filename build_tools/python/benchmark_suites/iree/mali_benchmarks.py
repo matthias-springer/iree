@@ -48,7 +48,7 @@ class Android_Mali_Benchmarks(object):
   FUSE_PADDING_REPEATED_KERNEL_RUN_FLAGS = ["--batch_size=32"]
 
   FP32_MODELS = [
-      tflite_models.DEEPLABV3_FP32,
+      #tflite_models.DEEPLABV3_FP32,
       tflite_models.MOBILESSD_FP32,
       tflite_models.POSENET_FP32,
       tflite_models.MOBILEBERT_FP32,

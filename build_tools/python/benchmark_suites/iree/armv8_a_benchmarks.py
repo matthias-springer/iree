@@ -17,7 +17,7 @@ import benchmark_suites.iree.utils
 class Android_ARMv8_A_Benchmarks(object):
   """Benchmarks on ARMv8-A Android devices."""
   NONQUANT_MODELS = [
-      tflite_models.DEEPLABV3_FP32,
+      #tflite_models.DEEPLABV3_FP32,
       tflite_models.MOBILESSD_FP32,
       tflite_models.POSENET_FP32,
       tflite_models.MOBILEBERT_FP32,
