@@ -11,6 +11,12 @@
 #include "mlir/IR/OperationSupport.h"
 
 namespace mlir {
+class RewriterBase;
+
+namespace tensor {
+class InsertSliceOp;
+}  // namespace tensor
+
 namespace iree_compiler {
 namespace IREE {
 namespace Flow {
@@ -18,6 +24,9 @@ namespace Flow {
 // Adds patterns for Tensor->Flow, for running before dispatch region formation.
 void populateTensorToFlowConversionPatterns(MLIRContext *context,
                                             RewritePatternSet &patterns);
+
+LogicalResult convertInsertSliceToFlowUpdate(RewriterBase &rewriter,
+                                             tensor::InsertSliceOp insertOp);
 
 }  // namespace Flow
 }  // namespace IREE

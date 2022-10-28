@@ -105,6 +105,48 @@ static SmallVector<Value, 4> getDynamicDimValues(OpBuilder &b, Location loc,
   return dynamicDims;
 }
 
+LogicalResult convertInsertSliceToFlowUpdate(RewriterBase &rewriter,
+                                             tensor::InsertSliceOp insertOp) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(insertOp);
+
+  if (insertOp->getParentOfType<Flow::DispatchWorkgroupsOp>()) {
+    return failure();
+  }
+
+  SmallVector<OpFoldResult, 4> offsets = insertOp.getMixedOffsets();
+  SmallVector<OpFoldResult, 4> sizes = insertOp.getMixedSizes();
+  SmallVector<OpFoldResult, 4> strides = insertOp.getMixedStrides();
+  ArrayRef<int64_t> dstShape = insertOp.getType().getShape();
+  if (!isOffsetSizeAndStrideMappableToFlow(offsets, sizes, strides, dstShape)) {
+    return failure();
+  }
+
+  Location loc = insertOp.getLoc();
+  auto sourceDynamicDims = getDynamicValues(sizes);
+  Value source = insertOp.getSource();
+  ShapedType sourceType = insertOp.getSourceType();
+  ShapedType destType = insertOp.getType();
+
+  // Handle rank-reduced version.
+  if (sourceType.getRank() < destType.getRank()) {
+    // Get the un-rank-reduced shape of the source.
+    auto unreducedShape = getShapeFromSizes(sizes);
+    sourceType =
+        RankedTensorType::get(unreducedShape, sourceType.getElementType());
+    source = rewriter.create<IREE::Flow::TensorReshapeOp>(
+        loc, sourceType, source, sourceDynamicDims, sourceDynamicDims);
+  }
+
+  auto offsetVals = getAsValues(rewriter, loc, insertOp.getMixedOffsets());
+  Value dest = insertOp.getDest();
+  auto destDynamicDims = getDynamicDimValues(rewriter, loc, dest);
+  rewriter.replaceOpWithNewOp<TensorUpdateOp>(
+      insertOp, insertOp.getType(), dest, destDynamicDims, offsetVals, source,
+      sourceDynamicDims, rewriter.getIndexArrayAttr({0}));
+  return success();
+}
+
 namespace {
 
 /// Convert tensor.insert_slice ops into flow.tensor.update ops where possible.
@@ -113,42 +155,7 @@ struct ConvertTensorInsertSlicePattern
   using OpRewritePattern<tensor::InsertSliceOp>::OpRewritePattern;
   LogicalResult matchAndRewrite(tensor::InsertSliceOp insertOp,
                                 PatternRewriter &rewriter) const override {
-    if (insertOp->getParentOfType<Flow::DispatchWorkgroupsOp>()) {
-      return failure();
-    }
-
-    SmallVector<OpFoldResult, 4> offsets = insertOp.getMixedOffsets();
-    SmallVector<OpFoldResult, 4> sizes = insertOp.getMixedSizes();
-    SmallVector<OpFoldResult, 4> strides = insertOp.getMixedStrides();
-    ArrayRef<int64_t> dstShape = insertOp.getType().getShape();
-    if (!isOffsetSizeAndStrideMappableToFlow(offsets, sizes, strides,
-                                             dstShape)) {
-      return failure();
-    }
-
-    Location loc = insertOp.getLoc();
-    auto sourceDynamicDims = getDynamicValues(sizes);
-    Value source = insertOp.getSource();
-    ShapedType sourceType = insertOp.getSourceType();
-    ShapedType destType = insertOp.getType();
-
-    // Handle rank-reduced version.
-    if (sourceType.getRank() < destType.getRank()) {
-      // Get the un-rank-reduced shape of the source.
-      auto unreducedShape = getShapeFromSizes(sizes);
-      sourceType =
-          RankedTensorType::get(unreducedShape, sourceType.getElementType());
-      source = rewriter.create<IREE::Flow::TensorReshapeOp>(
-          loc, sourceType, source, sourceDynamicDims, sourceDynamicDims);
-    }
-
-    auto offsetVals = getAsValues(rewriter, loc, insertOp.getMixedOffsets());
-    Value dest = insertOp.getDest();
-    auto destDynamicDims = getDynamicDimValues(rewriter, loc, dest);
-    rewriter.replaceOpWithNewOp<TensorUpdateOp>(
-        insertOp, insertOp.getType(), dest, destDynamicDims, offsetVals, source,
-        sourceDynamicDims, rewriter.getIndexArrayAttr({0}));
-    return success();
+    return convertInsertSliceToFlowUpdate(rewriter, insertOp);
   }
 };
 

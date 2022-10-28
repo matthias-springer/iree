@@ -1303,12 +1303,8 @@ func.func @concat_pattern(%src1 : tensor<2x40xf32>, %src2 : tensor<3x40xf32>,
 // CHECK-SAME:     %[[SRC1:.+]]: tensor<2x40xf32>
 // CHECK-SAME:     %[[SRC2:.+]]: tensor<3x40xf32>
 // CHECK-SAME:     %[[DEST:.+]]: tensor<5x40xf32>
-//      CHECK:   %[[UPDATE1:.+]] = flow.dispatch.workgroups[%{{.*}}, %{{.*}}](%[[SRC1]], %[[DEST]])
-//      CHECK:     flow.dispatch.tensor.load
-//      CHECK:     flow.dispatch.tensor.store
-//      CHECK:   %[[UPDATE2:.+]] = flow.dispatch.workgroups[%{{.*}}, %{{.*}}](%[[SRC2]], %[[UPDATE1]])
-//      CHECK:     flow.dispatch.tensor.load
-//      CHECK:     flow.dispatch.tensor.store
+//      CHECK:   %[[UPDATE1:.+]] = flow.tensor.update %[[SRC1]], %[[DEST]]
+//      CHECK:   %[[UPDATE2:.+]] = flow.tensor.update %[[SRC2]], %[[UPDATE1]]
 //      CHECK:   return %[[UPDATE2]]
 
 // -----
