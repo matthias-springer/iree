@@ -153,7 +153,7 @@ createDispatchLinalgOnTensorsPass(bool aggressiveFusion = false);
 // DispatchRegionOps, then DispatchWorkgroupsOps.)
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 createDispatchLinalgOnTensorsViaRegionOpsPass(
-    bool generateWorkloadRegion = true);
+    bool aggressiveFusion = false, bool generateWorkloadRegion = true);
 
 // Pass to perform dispatch of Linalg on tensor ops by using the transform
 // dialect. Dispatch regions are created as specified by the transform module

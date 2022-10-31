@@ -367,17 +367,17 @@ struct DispatchLinalgOnTensorsViaRegionOpsPass
         .insert<AffineDialect, IREE::Flow::FlowDialect, linalg::LinalgDialect,
                 scf::SCFDialect, tensor::TensorDialect>();
   }
-  DispatchLinalgOnTensorsViaRegionOpsPass(bool generateWorkloadRegion) {
+  DispatchLinalgOnTensorsViaRegionOpsPass(bool aggressiveFusion,
+                                          bool generateWorkloadRegion) {
+    this->aggressiveFusion = aggressiveFusion;
     this->generateWorkloadRegion = generateWorkloadRegion;
   }
   DispatchLinalgOnTensorsViaRegionOpsPass(
       const DispatchLinalgOnTensorsViaRegionOpsPass &pass) {
+    this->aggressiveFusion = pass.aggressiveFusion;
     this->generateWorkloadRegion = pass.generateWorkloadRegion;
   }
   void runOnOperation() override;
-
- private:
-  bool generateWorkloadRegion = true;
 };
 }  // namespace
 
@@ -389,8 +389,8 @@ void DispatchLinalgOnTensorsViaRegionOpsPass::runOnOperation() {
   TensorDimTrackingRewriter rewriter(funcOp);
 
   // Step 0: Decide fusion groups (heuristic).
-  Flow::FusionGroupMapping fusionGroups = Flow::decideFusableLinalgOps(
-      funcOp, dominanceInfo, /*aggressiveFusion=*/false);
+  Flow::FusionGroupMapping fusionGroups =
+      Flow::decideFusableLinalgOps(funcOp, dominanceInfo, aggressiveFusion);
 
   // Step 1: Create a DispatchWorkgroupsOp for every fusion group.
   auto maybeWorkgroupsOps = createFusionGroups(
@@ -455,7 +455,7 @@ void DispatchLinalgOnTensorsViaRegionOpsPass::runOnOperation() {
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 Flow::createDispatchLinalgOnTensorsViaRegionOpsPass(
-    bool generateWorkloadRegion) {
+    bool aggressiveFusion, bool generateWorkloadRegion) {
   return std::make_unique<DispatchLinalgOnTensorsViaRegionOpsPass>(
-      generateWorkloadRegion);
+      aggressiveFusion, generateWorkloadRegion);
 }
