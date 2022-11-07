@@ -91,12 +91,17 @@ static bool isOffsetSizeAndStrideMappableToFlow(ArrayRef<OpFoldResult> offsets,
   return true;
 }
 
+static bool isInDispatchRegion(Operation *op) {
+  return op->getParentOfType<Flow::DispatchWorkgroupsOp>() ||
+         op->getParentOfType<Flow::DispatchRegionOp>();
+}
+
 LogicalResult convertInsertSliceOpToFlowUpdateOp(
     RewriterBase &rewriter, tensor::InsertSliceOp insertOp) {
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(insertOp);
 
-  if (insertOp->getParentOfType<Flow::DispatchWorkgroupsOp>()) {
+  if (isInDispatchRegion(insertOp)) {
     return failure();
   }
 
@@ -135,7 +140,10 @@ LogicalResult convertInsertSliceOpToFlowUpdateOp(
 
 LogicalResult convertExtractSliceOpToFlowSliceOp(
     RewriterBase &rewriter, tensor::ExtractSliceOp sliceOp) {
-  if (sliceOp->getParentOfType<Flow::DispatchWorkgroupsOp>()) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(sliceOp);
+
+  if (isInDispatchRegion(sliceOp)) {
     return failure();
   }
 

@@ -790,9 +790,11 @@ static FailureOr<Flow::WorkloadBuilder> getWorkloadBuilder(OpBuilder &builder,
 /// Create Flow::DispatchGroupsOps based on a fusion heuristic.
 static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> createFusionGroups(
     TensorDimTrackingRewriter &rewriter, FunctionOpInterface funcOp,
-    DominanceInfo const &dominanceInfo, bool generateWorkloadRegion, bool aggressiveFusion) {
+    DominanceInfo const &dominanceInfo, bool generateWorkloadRegion,
+    bool aggressiveFusion) {
   // Decide fusion groups (heuristic).
-  unsigned numRoots = decideFusableLinalgOps(funcOp, dominanceInfo, aggressiveFusion);
+  unsigned numRoots =
+      decideFusableLinalgOps(funcOp, dominanceInfo, aggressiveFusion);
   SmallVector<Operation *> roots(numRoots, nullptr);
   DenseMap<unsigned, SmallVector<Operation *>> producers;
 
@@ -925,6 +927,11 @@ static FailureOr<SmallVector<Flow::DispatchWorkgroupsOp>> wrapInWorkgroupsOp(
   return wrapInWorkgroupsOp(rewriter, rootOps, generateWorkloadRegion);
 }
 
+static bool isInDispatchRegion(Operation *op) {
+  return op->getParentOfType<Flow::DispatchWorkgroupsOp>() ||
+         op->getParentOfType<Flow::DispatchRegionOp>();
+}
+
 namespace {
 /// Pass declaration.
 struct DispatchLinalgOnTensorsPass
@@ -958,8 +965,9 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
   TensorDimTrackingRewriter rewriter(funcOp);
 
   // Step 1: Create a DispatchWorkgroupsOp for every fusion group.
-  auto maybeWorkgroupsOps = createFusionGroups(rewriter, funcOp, dominanceInfo,
-                                               generateWorkloadRegion, aggressiveFusion);
+  auto maybeWorkgroupsOps =
+      createFusionGroups(rewriter, funcOp, dominanceInfo,
+                         generateWorkloadRegion, aggressiveFusion);
   if (failed(maybeWorkgroupsOps)) return signalPassFailure();
   SmallVector<Flow::DispatchWorkgroupsOp> workgroupsOps = *maybeWorkgroupsOps;
 
@@ -973,8 +981,7 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
   SmallVector<tensor::InsertSliceOp> insertSliceOps;
   SmallVector<Operation *> remainingInsertSliceOps;
   funcOp.walk([&](tensor::InsertSliceOp op) {
-    if (!op->getParentOfType<Flow::DispatchRegionOp>())
-      insertSliceOps.push_back(op);
+    if (!isInDispatchRegion(op)) insertSliceOps.push_back(op);
   });
   for (tensor::InsertSliceOp insertSliceOp : insertSliceOps)
     if (failed(
@@ -988,11 +995,27 @@ void DispatchLinalgOnTensorsPass::runOnOperation() {
   if (failed(newWorkgroupsOps)) return signalPassFailure();
   workgroupsOps.append(newWorkgroupsOps->begin(), newWorkgroupsOps->end());
 
+  // Step Xa: Rewrite ExtractSliceOps to TensorSliceOps.
+  SmallVector<tensor::ExtractSliceOp> extractSliceOps;
+  SmallVector<Operation *> remainingExtractSliceOps;
+  funcOp.walk([&](tensor::ExtractSliceOp op) {
+    if (!isInDispatchRegion(op)) extractSliceOps.push_back(op);
+  });
+  for (tensor::ExtractSliceOp extractSliceOp : extractSliceOps)
+    if (failed(
+            Flow::convertExtractSliceOpToFlowSliceOp(rewriter, extractSliceOp)))
+      remainingExtractSliceOps.push_back(extractSliceOp);
+
+  // Step Xb: Create a DispatchWorkgroupsOp for every remaining ExtractSliceOp.
+  newWorkgroupsOps = wrapInWorkgroupsOp(rewriter, remainingExtractSliceOps,
+                                        generateWorkloadRegion);
+  if (failed(newWorkgroupsOps)) return signalPassFailure();
+  workgroupsOps.append(newWorkgroupsOps->begin(), newWorkgroupsOps->end());
+
   // Step 3: Create a DispatchWorkgroupsOp for certain other ops.
   newWorkgroupsOps =
-      wrapInWorkgroupsOp<tensor::ExtractSliceOp, LinalgExt::SetEncodingOp,
-                         LinalgExt::UnsetEncodingOp>(rewriter, funcOp,
-                                                     generateWorkloadRegion);
+      wrapInWorkgroupsOp<LinalgExt::SetEncodingOp, LinalgExt::UnsetEncodingOp>(
+          rewriter, funcOp, generateWorkloadRegion);
   if (failed(newWorkgroupsOps)) return signalPassFailure();
   workgroupsOps.append(newWorkgroupsOps->begin(), newWorkgroupsOps->end());
 
