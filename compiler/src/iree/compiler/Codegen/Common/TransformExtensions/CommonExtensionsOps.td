@@ -33,6 +33,8 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
     unspecified order:
       - additional_iree_patterns: fancy patterns we shortcut into the system,
       will need to be sliced out better in the future.
+      - bubble_collapse_expand: bubble `expand_shape` up and `collapse_shape`
+      down across Linalg ops.
       - canonicalization: adds all the canonicalization patterns of all
       registered dialects and ops.
       - promote_foreach_thread_capture_to_shared: adds patterns that rewrite
@@ -43,8 +45,9 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
       be unsafe wrt parallelism so use carefully!
       - rank_reducing: adds patterns that results in rank-reducing behavior on
       subset-based operations.
-      - simplify_memref_metadata: adds patterns that simplify the uses of
-      memref.extract_strided_metadata and fold to the underlying indices.
+      - expand_memref_strided_metadata: adds patterns that expand memref
+      operations into extract_strided_metadata operations and a materialization
+      of their effect on the metadata (sizes, offset, strides).
       - swapping_patterns: adds patterns that swap operations for a better outcome.
       This is a catch all that can be refined further if/when needed.
       - swap_padding_elide_conditional: refines the tensor.pad +
@@ -69,10 +72,11 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
 
   let arguments = (ins PDL_Operation:$target,
                        UnitAttr:$additional_iree_patterns,
+                       UnitAttr:$bubble_collapse_expand,
                        UnitAttr:$canonicalization,
                        UnitAttr:$promote_foreach_thread_capture_to_shared,
                        UnitAttr:$rank_reducing,
-                       UnitAttr:$simplify_memref_metadata,
+                       UnitAttr:$expand_memref_strided_metadata,
                        UnitAttr:$swap_padding_elide_conditional,
                        UnitAttr:$swapping_patterns);
   let results = (outs PDL_Operation:$result);
@@ -119,8 +123,12 @@ def IREEBufferizeOp : Op<Transform_Dialect, "iree.bufferize",
     No handles are consumed or produced.
   }];
 
-  let arguments = (ins PDL_Operation:$target,
-                       UnitAttr:$target_gpu);
+  let arguments = (
+      ins PDL_Operation:$target,
+          UnitAttr:$target_gpu,
+          DefaultValuedAttr<BoolAttr, "false">:$test_analysis_only,
+          DefaultValuedAttr<BoolAttr, "false">:$print_conflicts
+  );
   let results = (outs PDL_Operation:$result);
 
   let assemblyFormat = "attr-dict $target";
@@ -129,6 +137,35 @@ def IREEBufferizeOp : Op<Transform_Dialect, "iree.bufferize",
   let builders = [
     OpBuilder<(ins "Value":$target, CArg<"bool", "false">:$targetGpu)>
   ];
+}
+
+def IREEEraseHALDescriptorTypeFromMemRefOp : Op<Transform_Dialect,
+    "iree.erase_hal_descriptor_type_from_memref",
+    [FunctionalStyleTransformOpTrait,
+     MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let description = [{
+    Erase #hal.descriptor_type from MemRef memory space to ignore all IREE
+    memory space planning. This is meant to ease transitioning given that
+    various LLVM conversion upstream patterns assumes numeric memory space,
+    especially the default 0.
+
+    Return modes:
+    =============
+    The pass is ran on all FuncOp nested under the top-level op on which
+    the transform dialect interpreter pass is applied.
+
+    If any of the pass on any of the FuncOp fails, the transformation
+    definitely fails. Otherwise the transformation succeeds.
+  }];
+
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+
+  let assemblyFormat = "attr-dict $target";
+  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
+
+  let builders = [OpBuilder<(ins "Value":$target)>];
 }
 
 def ForeachThreadToWorkgroupOp : Op<Transform_Dialect,
@@ -209,19 +246,17 @@ def TileToForeachThreadAndWorkgroupCountRegionOp :
   let arguments = (ins PDL_Operation:$target,
                    Variadic<PDL_Operation>:$num_threads,
                    Variadic<PDL_Operation>:$tile_sizes,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$static_num_threads,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$static_tile_sizes,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$static_num_threads,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$static_tile_sizes,
                    OptionalAttr<DeviceMappingArrayAttr>:$mapping);
   let results = (outs PDL_Operation:$foreach_thread_op,
                       PDL_Operation:$tiled_op);
   let assemblyFormat = [{
     $target oilist(
         `num_threads` custom<DynamicIndexList>($num_threads,
-                                               $static_num_threads,
-                                               "ShapedType::kDynamicSize") |
+                                               $static_num_threads) |
          `tile_sizes` custom<DynamicIndexList>($tile_sizes,
-                                               $static_tile_sizes,
-                                               "ShapedType::kDynamicSize"))
+                                               $static_tile_sizes))
     (`(` `mapping` `=` $mapping^ `)`)? attr-dict
   }];
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";

@@ -30,7 +30,6 @@ struct LinalgFusePassOptions {
   bool vectorize = false;
   bool vectorizePadding = false;
   int64_t tilingLevel = -1;
-  bool doIREEDistribution = false;
 };
 
 /// Creates a pass to drive tile + fuse transformations of `LinalgOp`s.
@@ -48,7 +47,6 @@ struct LinalgSingleTilingExpertPassOptions {
   std::string anchorOpName = "";
   SmallVector<int64_t> tileSizes = {};
   SmallVector<int64_t> tileInterchange = {};
-  SmallVector<int64_t> peeledLoops = {};
   bool pad = false;
   SmallVector<std::string> paddingValues = {};
   SmallVector<int64_t> packPaddings = {};

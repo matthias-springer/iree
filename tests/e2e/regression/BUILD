@@ -59,7 +59,11 @@ iree_lit_test_suite(
         ] + BACKEND_TESTS,
     ),
     cfg = "//tests:lit.cfg.py",
-    tags = ["hostonly"],
+    tags = [
+        "driver=local-task",
+        "driver=vulkan",
+        "hostonly",
+    ],
     tools = [
         "//tools:iree-opt",
         "//tools:iree-run-mlir",
@@ -137,6 +141,19 @@ iree_check_single_backend_test_suite(
         "disable_demote_f64_to_f32.mlir",
     ],
     compiler_flags = ["-iree-flow-demote-f64-to-f32=false"],
+    driver = "local-task",
+    target_backend = "llvm-cpu",
+)
+
+iree_check_single_backend_test_suite(
+    name = "aggressive_fusion_test",
+    srcs = [
+        "softmax.mlir",
+    ],
+    compiler_flags = [
+        "--iree-flow-enable-aggressive-fusion",
+        "--iree-llvmcpu-fail-on-out-of-bounds-stack-allocation=false",
+    ],
     driver = "local-task",
     target_backend = "llvm-cpu",
 )

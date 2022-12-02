@@ -27,6 +27,8 @@ iree_check_single_backend_test_suite(
         exclude = [
             "pack.mlir",
             "unpack.mlir",
+            "winograd_input.mlir",
+            "winograd_output.mlir",
         ],
     ),
     driver = "cuda",
@@ -89,6 +91,8 @@ iree_check_single_backend_test_suite(
             "sort.mlir",
             "top-k.mlir",
             "unpack.mlir",
+            "winograd_input.mlir",
+            "winograd_output.mlir",
         ],
         include = ["*.mlir"],
     ),
@@ -130,6 +134,10 @@ iree_check_single_backend_test_suite(
             "unpack.mlir",
         ],
         include = ["*.mlir"],
+        exclude = [
+            "winograd_input.mlir",
+            "winograd_output.mlir",
+        ],
     ),
     driver = "local-task",
     target_backend = "vmvx",
@@ -145,6 +153,7 @@ iree_check_single_backend_test_suite(
             # Top-k test disabled due to miscompile on vulkan.
             #    "top-k.mlir",
             "sort.mlir",
+            "winograd_input.mlir",
         ],
         include = ["*.mlir"],
         exclude = [
@@ -154,6 +163,7 @@ iree_check_single_backend_test_suite(
             # Re-enable this once we have new devices with up-to-date drivers.
             "top-k.mlir",
             "scan.mlir",
+            "winograd_output.mlir",
         ],
     ),
     driver = "vulkan",

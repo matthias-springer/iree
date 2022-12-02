@@ -18,6 +18,7 @@ iree_lit_test_suite(
     name = "lit",
     srcs = enforce_glob(
         [
+            "compile_to_phase.mlir",
             "executable_benchmarks.mlir",
             "iree-benchmark-module.mlir",
             "iree-run-mlir.mlir",
@@ -33,6 +34,8 @@ iree_lit_test_suite(
     ),
     cfg = "//tools:lit.cfg.py",
     tags = [
+        "driver=local-task",
+        "driver=vulkan",
         "hostonly",
     ],
     tools = [

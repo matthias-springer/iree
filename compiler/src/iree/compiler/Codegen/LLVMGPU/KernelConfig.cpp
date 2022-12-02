@@ -29,7 +29,6 @@ using namespace mlir::iree_compiler;
 
 static constexpr unsigned cudaWarpSize = 32;
 static constexpr StringLiteral kCudaTarget = "cuda";
-static constexpr StringLiteral kReductionStrategyName = "reduction_strategy";
 namespace mlir {
 namespace iree_compiler {
 llvm::cl::opt<std::string> clGPUCodegenTransformDialectFileName(
@@ -182,9 +181,9 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
       op.getDpsInputOperand(0)->get().getType().cast<ShapedType>().getShape();
   auto rhsShape =
       op.getDpsInputOperand(1)->get().getType().cast<ShapedType>().getShape();
-  int64_t sizeM = ShapedType::kDynamicSize;
-  int64_t sizeN = ShapedType::kDynamicSize;
-  int64_t sizeK = ShapedType::kDynamicSize;
+  int64_t sizeM = ShapedType::kDynamic;
+  int64_t sizeN = ShapedType::kDynamic;
+  int64_t sizeK = ShapedType::kDynamic;
   auto outputMap = op.getMatchingIndexingMap(op.getDpsInitOperand(0));
   for (unsigned i = 0; i < lhsShape.size(); i++) {
     if (op.getMatchingIndexingMap(op.getDpsInputOperand(0)).getDimPosition(i) ==
@@ -211,9 +210,9 @@ static LogicalResult setContractConfig(func::FuncOp entryPoint,
       }
     }
   }
-  bool isStaticSize = sizeM != ShapedType::kDynamicSize &&
-                      sizeN != ShapedType::kDynamicSize &&
-                      sizeK != ShapedType::kDynamicSize;
+  bool isStaticSize = sizeM != ShapedType::kDynamic &&
+                      sizeN != ShapedType::kDynamic &&
+                      sizeK != ShapedType::kDynamic;
   if (isStaticSize) {
     /// Try tensorcore config first.
     if (supportsTensorCore(entryPoint, op)) {
@@ -355,8 +354,7 @@ static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
       IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDistribute;
   TileSizesListType tileSizes;
   auto interfaceOp = cast<PartitionableLoopsInterface>(*op);
-  auto partitionedLoops =
-      interfaceOp.getPartitionableLoops(kNumMaxParallelDims);
+  auto partitionedLoops = interfaceOp.getPartitionableLoops(llvm::None);
   if (partitionedLoops.empty()) {
     tileSizes.push_back({});
     return setOpConfigAndEntryPointFnTranslation(entryPoint, op, tileSizes,
@@ -400,6 +398,8 @@ static LogicalResult setRootDefaultConfig(func::FuncOp entryPoint,
              shape.back() % (workgroupSize[0] * vectorSize) != 0) {
         vectorSize /= 2;
       }
+      if (vectorSize == 1)  // assume there is fastpath + slowpath
+        vectorSize = 4;
       int64_t problemSize = std::accumulate(
           shape.begin(), shape.end(), 1,
           [](const int64_t &a, const int64_t &b) { return a * b; });
@@ -471,8 +471,7 @@ static LogicalResult setReductionTransformJitConfig(func::FuncOp entryPoint,
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
       entryPoint->getContext(), IREE::Codegen::DispatchLoweringPassPipeline::
                                     TransformDialectJitterCodegen);
-  setTranslationInfo(entryPoint, translationInfo);
-  return success();
+  return setTranslationInfo(entryPoint, translationInfo);
 }
 
 /// Set the configuration for reductions that can be mapped to warp reductions.
@@ -509,10 +508,12 @@ static LogicalResult setWarpReductionConfig(func::FuncOp entryPoint,
                                .cast<ShapedType>()
                                .getElementType();
   if (!elementType.isIntOrFloat()) return failure();
-  // Reduction distribution only supports 32-bit types now.
-  if (elementType.getIntOrFloatBitWidth() != 32) return failure();
+  unsigned bitWidth = elementType.getIntOrFloatBitWidth();
+  // Reduction distribution only supports 8/16/32 bit types now.
+  if (bitWidth != 32 && bitWidth != 16 && bitWidth != 8) return failure();
 
-  unsigned vectorSize = 4;
+  const unsigned largestLoadSizeInBits = 128;
+  unsigned vectorSize = largestLoadSizeInBits / bitWidth;
   while ((*dimSize / vectorSize) % cudaWarpSize != 0) vectorSize /= 2;
 
   // TODO: Add reduction tiling to handle larger reductions.
@@ -834,7 +835,7 @@ LogicalResult initGPULaunchConfig(ModuleOp moduleOp) {
       auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
           moduleOp.getContext(), IREE::Codegen::DispatchLoweringPassPipeline::
                                      TransformDialectInterpreterCodegen);
-      setTranslationInfo(funcOp, translationInfo);
+      if (failed(setTranslationInfo(funcOp, translationInfo))) return failure();
       if (clGPUCodegenTransformDialectTileSizes.empty()) continue;
     }
 

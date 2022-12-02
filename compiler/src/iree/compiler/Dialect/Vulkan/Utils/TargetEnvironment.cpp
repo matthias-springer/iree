@@ -171,6 +171,7 @@ spirv::ResourceLimitsAttr convertResourceLimits(
       context, vkCapabilities.getMaxComputeSharedMemorySize(),
       vkCapabilities.getMaxComputeWorkGroupInvocations(),
       builder.getI64ArrayAttr(sizes), vkCapabilities.getSubgroupSize(),
+      /*min_subgroup_size=*/llvm::None, /*max_subgroup_size=*/llvm::None,
       ArrayAttr::get(context, spvAttrs));
 }
 }  // anonymous namespace
@@ -193,9 +194,9 @@ spirv::TargetEnvAttr convertTargetEnv(Vulkan::TargetEnvAttr vkTargetEnv) {
 
   auto triple = spirv::VerCapExtAttr::get(
       spvVersion, spvCapabilities, spvExtensions, vkTargetEnv.getContext());
-  return spirv::TargetEnvAttr::get(triple, vkTargetEnv.getVendorID(),
-                                   vkTargetEnv.getDeviceType(),
-                                   vkTargetEnv.getDeviceID(), spvLimits);
+  return spirv::TargetEnvAttr::get(
+      triple, spvLimits, spirv::ClientAPI::Vulkan, vkTargetEnv.getVendorID(),
+      vkTargetEnv.getDeviceType(), vkTargetEnv.getDeviceID());
 }
 
 }  // namespace Vulkan

@@ -896,12 +896,11 @@ struct GeneralizePackOpPattern : OpRewritePattern<PackOp> {
     }
     // The dimensions map in the order of output dimensions. Since the
     // interchange is applied, we have to undo it for input.
-    if (auto outerDims = packOp.getOuterDimsPerm()) {
-      inputExprs = undoInterchange<AffineExpr>(
-          inputExprs, extractFromI64ArrayAttr(outerDims));
+    if (!packOp.getOuterDimsPerm().empty()) {
+      inputExprs =
+          undoInterchange<AffineExpr>(inputExprs, packOp.getOuterDimsPerm());
     }
-    for (auto en :
-         llvm::enumerate(extractFromI64ArrayAttr(packOp.getInnerDimsPos()))) {
+    for (auto en : llvm::enumerate(packOp.getInnerDimsPos())) {
       inputExprs[en.value()] =
           rewriter.getAffineDimExpr(inputRank + en.index());
     }
@@ -967,8 +966,7 @@ struct GeneralizeUnPackOpPattern : OpRewritePattern<UnPackOp> {
         loc, readType, unpackOp.getInput(), readOffsets, readSizes,
         readStrides);
 
-    SmallVector<int64_t> innerDimsPos =
-        extractFromI64ArrayAttr(unpackOp.getInnerDimsPos());
+    ArrayRef<int64_t> innerDimsPos = unpackOp.getInnerDimsPos();
     auto interchangeVector =
         computeInterchangeFromDimPos(innerDimsPos, outputRank);
     SmallVector<int64_t> transpShape =
@@ -1024,20 +1022,48 @@ struct LinalgExtVectorizationPass
     // Apply tiling to make outer dims be all 1s.
     {
       SimpleRewriter rewriter(ctx);
-      auto options = scf::SCFTilingOptions().setTileSizeComputationFunction(
-          [](OpBuilder &builder, Operation *op) {
-            Location loc = op->getLoc();
-            auto packOp = cast<PackOp>(op);
-            auto innerDims = extractFromI64ArrayAttr(packOp.getInnerDimsPos());
-            int inputRank = packOp.getInputRank();
-            SmallVector<Value> tileSizes(
-                inputRank, builder.create<arith::ConstantIndexOp>(loc, 1));
-            return tileSizes;
-          });
+      auto packTilingOptions =
+          scf::SCFTilingOptions().setTileSizeComputationFunction(
+              [](OpBuilder &builder, Operation *op) {
+                Location loc = op->getLoc();
+                int inputRank = cast<PackOp>(op).getInputRank();
+                SmallVector<Value> tileSizes(
+                    inputRank, builder.create<arith::ConstantIndexOp>(loc, 1));
+                return tileSizes;
+              });
       auto funcOp = getOperation();
       funcOp->walk([&](LinalgExt::PackOp op) {
         FailureOr<scf::SCFTilingResult> tilingResult = scf::tileUsingSCFForOp(
-            rewriter, cast<TilingInterface>(op.getOperation()), options);
+            rewriter, cast<TilingInterface>(op.getOperation()),
+            packTilingOptions);
+        if (failed(tilingResult))
+          return signalPassFailure();
+        rewriter.replaceOp(op, tilingResult->replacements);
+      });
+
+      auto unpackTilingOptions =
+          scf::SCFTilingOptions().setTileSizeComputationFunction(
+              [](OpBuilder &builder, Operation *op) {
+                Location loc = op->getLoc();
+                auto unpackOp = cast<UnPackOp>(op);
+                int numLoops = unpackOp.getOutputRank();
+                auto dimAndTileMapping = unpackOp.getDimAndTileMapping();
+                SmallVector<Value> tileSizes;
+                for (int i = 0; i < numLoops; ++i) {
+                  if (dimAndTileMapping.count(i)) {
+                    tileSizes.push_back(getValueOrCreateConstantIndexOp(
+                        builder, loc, dimAndTileMapping[i]));
+                  } else {
+                    tileSizes.push_back(
+                        getDimValue(builder, loc, unpackOp.getOutput(), i));
+                  }
+                }
+                return tileSizes;
+              });
+      funcOp->walk([&](LinalgExt::UnPackOp op) {
+        FailureOr<scf::SCFTilingResult> tilingResult = scf::tileUsingSCFForOp(
+            rewriter, cast<TilingInterface>(op.getOperation()),
+            unpackTilingOptions);
         if (failed(tilingResult))
           return signalPassFailure();
         rewriter.replaceOp(op, tilingResult->replacements);

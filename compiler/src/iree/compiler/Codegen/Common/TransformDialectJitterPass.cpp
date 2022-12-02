@@ -52,6 +52,7 @@
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 
 using namespace mlir;
+
 namespace {
 /// Pass declaration.
 /// Jitter pass that applies transform dialect ops for codegen.

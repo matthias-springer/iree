@@ -407,7 +407,8 @@ Optional<MemRefType> MemRefConversionPattern<OpTy>::getVectorizedMemRefType(
   if (newShape.back() % ratio != 0) return {};
   newShape.back() = newShape.back() / ratio;
 
-  return MemRefType::get(newShape, vectorType, {}, type.getMemorySpaceAsInt());
+  return MemRefType::get(newShape, vectorType, MemRefLayoutAttrInterface(),
+                         type.getMemorySpace());
 }
 
 template <typename OpTy>
@@ -510,7 +511,7 @@ struct ProcessSubgroupMMALoad final
 
     rewriter.replaceOpWithNewOp<gpu::SubgroupMmaLoadMatrixOp>(
         loadOp, loadOp.getType(), adaptor.getSrcMemref(), indices.value(),
-        newLeadDimSize);
+        newLeadDimSize, loadOp.getTransposeAttr());
     return success();
   }
 };
