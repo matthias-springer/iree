@@ -6,8 +6,6 @@
 
 #include "CommonExtensions.h"
 
-#include <iree/compiler/Dialect/HAL/IR/HALOps.h>
-
 #include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/SimplePatternRewriter.h"
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
@@ -17,6 +15,7 @@
 #include "iree/compiler/Codegen/Passes.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -32,6 +31,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 using namespace mlir;
 using namespace mlir::iree_compiler;
@@ -199,11 +199,15 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
   if (getPromoteForeachThreadCaptureToShared())
     addForeachThreadCapturePromotionPatterns(patterns);
   if (getRankReducing()) addRankReducingPatterns(patterns);
-  if (getSimplifyMemrefMetadata())
-    memref::populateSimplifyExtractStridedMetadataOpPatterns(patterns);
+  if (getExpandMemrefStridedMetadata())
+    memref::populateExpandStridedMetadataPatterns(patterns);
   if (getSwappingPatterns())
     addSwappingPatterns(patterns, getSwapPaddingElideConditional());
   if (getAdditionalIreePatterns()) addAdditionalIreePatterns(patterns);
+  if (getBubbleCollapseExpand()) {
+    linalg::populateFoldReshapeOpsByExpansionPatterns(
+        patterns, [](OpOperand *) { return true; });
+  }
 
   TrackingListener listener(state);
   GreedyRewriteConfig config;
@@ -472,21 +476,20 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
   SmallVector<int64_t> staticTileSizes;
   SmallVector<Value> dynamicTileSizes;
   dispatchIndexOpFoldResults(mixedTileSizes, dynamicTileSizes, staticTileSizes,
-                             ShapedType::kDynamicSize);
+                             ShapedType::kDynamic);
   // Call the default builder which sets up the proper operands segment sizes
   // attributes for multiple variadic operands. In the absence of this, horrible
   // bugs ensue.
   MLIRContext *ctx = builder.getContext();
   auto operationType = pdl::OperationType::get(ctx);
-  auto staticTileSizesAttr = builder.getI64ArrayAttr(staticTileSizes);
 
   build(builder, result,
         /*resultTypes=*/TypeRange{operationType, operationType},
         /*target=*/target,
         /*numThreads=*/ValueRange{},
         /*tileSizes=*/dynamicTileSizes,
-        /*staticNumThreads=*/ArrayAttr(),
-        /*staticTileSizes=*/staticTileSizesAttr,
+        /*staticNumThreads=*/ArrayRef<int64_t>(),
+        /*staticTileSizes=*/staticTileSizes,
         /*mapping=*/mappingAttr);
 }
 
@@ -510,20 +513,19 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
   SmallVector<int64_t> staticNumThreads;
   SmallVector<Value> dynamicNumThreads;
   dispatchIndexOpFoldResults(mixedNumThreads, dynamicNumThreads,
-                             staticNumThreads, ShapedType::kDynamicSize);
+                             staticNumThreads, ShapedType::kDynamic);
   // Call the default builder which sets up the proper operands segment sizes
   // attributes for multiple variadic operands. In the absence of this, horrible
   // bugs ensue.
   MLIRContext *ctx = builder.getContext();
   auto operationType = pdl::OperationType::get(ctx);
-  auto staticNumThreadsAttr = builder.getI64ArrayAttr(staticNumThreads);
   build(builder, result,
         /*resultTypes=*/TypeRange{operationType, operationType},
         /*target=*/target,
         /*numThreads=*/dynamicNumThreads,
         /*tileSizes=*/ValueRange{},
-        /*staticNumThreads=*/staticNumThreadsAttr,
-        /*staticTileSizes=*/ArrayAttr(),
+        /*staticNumThreads=*/staticNumThreads,
+        /*staticTileSizes=*/ArrayRef<int64_t>(),
         /*mapping=*/mappingAttr);
 }
 
@@ -536,7 +538,8 @@ void transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::build(
 /// pdl::OperationType handles on the fly.
 static LogicalResult lowerWorkgroupCountComputingRegion(
     transform::TransformState &state, RewriterBase &rewriter, Location loc,
-    HAL::ExecutableExportOp exportOp, ArrayRef<OpFoldResult> tileSizes) {
+    HAL::ExecutableExportOp exportOp, ArrayRef<OpFoldResult> tileSizes,
+    Optional<ArrayAttr> mapping) {
   Region &r = exportOp.getWorkgroupCount();
   if (!r.hasOneBlock()) {
     return rewriter.notifyMatchFailure(exportOp,
@@ -579,7 +582,7 @@ static LogicalResult lowerWorkgroupCountComputingRegion(
         "number of tile sizes overflow the dimension from the workload");
   }
 
-  SmallVector<OpFoldResult> workgroupCount;
+  SmallVector<OpFoldResult> workgroupCount, permutedWorkgroupCount;
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(workgroupCountOp);
   loc = workgroupCountOp.getLoc();
@@ -596,21 +599,29 @@ static LogicalResult lowerWorkgroupCountComputingRegion(
         ArrayRef<OpFoldResult>{workload[tileSize.index()], tileSize.value()});
     workgroupCount.push_back(count);
   }
-  workgroupCount = llvm::to_vector(llvm::reverse(workgroupCount));
+  // Make sure to fill unused dimensions with 1
   workgroupCount.resize(3, rewriter.getIndexAttr(1));
-  rewriter.replaceOp(workgroupCountOp, getValueOrCreateConstantIndexOp(
-                                           rewriter, loc, workgroupCount));
+  permutedWorkgroupCount.resize(3, rewriter.getIndexAttr(1));
+  int mappingId = 0;
+  for (DeviceMappingAttrInterface map : mapping->getValue()) {
+    permutedWorkgroupCount[map.getMappingId()] = workgroupCount[mappingId++];
+  }
+  rewriter.replaceOp(
+      workgroupCountOp,
+      getValueOrCreateConstantIndexOp(rewriter, loc, permutedWorkgroupCount));
   return success();
 }
 
 SmallVector<OpFoldResult> transform_dialect::
     TileToForeachThreadAndWorkgroupCountRegionOp::getMixedNumThreads() {
-  return getMixedSizes(getStaticNumThreads(), getNumThreads());
+  Builder b(getContext());
+  return getMixedValues(getStaticNumThreads(), getNumThreads(), b);
 }
 
 SmallVector<OpFoldResult> transform_dialect::
     TileToForeachThreadAndWorkgroupCountRegionOp::getMixedTileSizes() {
-  return getMixedSizes(getStaticTileSizes(), getTileSizes());
+  Builder b(getContext());
+  return getMixedValues(getStaticTileSizes(), getTileSizes(), b);
 }
 
 LogicalResult
@@ -646,7 +657,8 @@ transform_dialect::TileToForeachThreadAndWorkgroupCountRegionOp::apply(
   /// regions are created by default in IREEs compilation flow.
   IRRewriter rewriter(getContext());
   if (failed(lowerWorkgroupCountComputingRegion(
-          state, rewriter, getLoc(), exportOp.value(), getMixedTileSizes()))) {
+          state, rewriter, getLoc(), exportOp.value(), getMixedTileSizes(),
+          getMapping()))) {
     return mlir::emitDefiniteFailure(exportOp.value(),
                                      "failed to lower workgroup count region");
   }
@@ -788,7 +800,7 @@ static OneShotBufferizationOptions getBufferizationOptions() {
 
   // This type converter converts tensor types to memref types when no exact
   // memref type can be inferred from the context.
-  options.unknownTypeConverterFn = [](Value value, unsigned memorySpace,
+  options.unknownTypeConverterFn = [](Value value, Attribute memorySpace,
                                       const BufferizationOptions &options) {
     auto tensorType = value.getType().cast<TensorType>();
 
@@ -804,20 +816,6 @@ static OneShotBufferizationOptions getBufferizationOptions() {
   };
 
   return options;
-}
-
-/// Temporarily copied from IREEComprehensiveBufferizePass.cpp to avoid buying
-/// into nested pass pipeline mess.
-static LogicalResult runIREEBufferizeOnModule(
-    ModuleOp moduleOp, BufferizationOptions::AllocationFn allocationFn,
-    BufferizationOptions::DeallocationFn deallocationFn,
-    BufferizationOptions::MemCpyFn memCpyFn) {
-  OneShotBufferizationOptions options = getBufferizationOptions();
-  options.allocationFn = allocationFn;
-  options.deallocationFn = deallocationFn;
-  options.memCpyFn = memCpyFn;
-
-  return runIREEOneShotBufferize(moduleOp, options);
 }
 
 namespace {
@@ -891,9 +889,14 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
                                      "listener tracking failed");
 
   //   3. Run one-shot-bufferize, without the pass baggage.
+  OneShotBufferizationOptions options = getBufferizationOptions();
+  options.allocationFn = allocationFn;
+  options.deallocationFn = deallocationFn;
+  options.memCpyFn = memCpyFn;
+  options.testAnalysisOnly = getTestAnalysisOnly();
+  options.printConflicts = getPrintConflicts();
   res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
-    if (failed(runIREEBufferizeOnModule(moduleOp, allocationFn, deallocationFn,
-                                        memCpyFn)))
+    if (failed(runIREEOneShotBufferize(moduleOp, options)))
       return WalkResult::interrupt();
     return WalkResult::advance();
   });
@@ -986,6 +989,38 @@ DiagnosedSilenceableFailure transform_dialect::ConfigExtractPart::apply(
   b.create<LinalgExt::DoNotDCEOperandsOp>(target->getLoc(), values);
 
   transformResults.set(getResultConfigPart().cast<OpResult>(), results);
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
+// EraseHALDescriptorTypeFromMemRef
+//===---------------------------------------------------------------------===//
+
+void transform_dialect::IREEEraseHALDescriptorTypeFromMemRefOp::build(
+    OpBuilder &builder, OperationState &result, Value target) {
+  result.addOperands(target);
+  MLIRContext *ctx = builder.getContext();
+  result.addTypes(pdl::OperationType::get(ctx));
+}
+
+DiagnosedSilenceableFailure
+transform_dialect::IREEEraseHALDescriptorTypeFromMemRefOp::apply(
+    transform::TransformResults &transformResults,
+    transform::TransformState &state) {
+  ArrayRef<Operation *> targetOps = state.getPayloadOps(getTarget());
+  if (targetOps.size() != 1 || !isa<func::FuncOp>(targetOps.front())) {
+    return mlir::emitDefiniteFailure(state.getTopLevel(),
+                                     "expects a func::FuncOp as the target op");
+  }
+  auto funcOp = cast<func::FuncOp>(targetOps.front());
+
+  if (failed(eraseHALDescriptorTypeFromMemRef(funcOp))) {
+    return mlir::emitDefiniteFailure(
+        state.getTopLevel(),
+        "failed to erase #hal.descriptor_type as MemRef memory space");
+  }
+
+  transformResults.set(getOperation()->getOpResult(0), targetOps.front());
   return DiagnosedSilenceableFailure::success();
 }
 

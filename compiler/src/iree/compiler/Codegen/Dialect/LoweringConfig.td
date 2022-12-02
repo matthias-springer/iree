@@ -47,8 +47,10 @@ def SPIRV_CooperativeMatrixVectorize
     : I32EnumAttrCase<"SPIRVCooperativeMatrixVectorize", 18>;
 def SPIRV_SubgroupReduce
     : I32EnumAttrCase<"SPIRVSubgroupReduce", 19>;
+def SPIRV_WinogradVectorize
+    : I32EnumAttrCase<"SPIRVWinogradVectorize", 20>;
 
-def VMVX_Default : I32EnumAttrCase<"VMVXDefault", 20>;
+def VMVX_Default : I32EnumAttrCase<"VMVXDefault", 21>;
 
 
 def Linalg_TransformInterpCodegen
@@ -72,7 +74,7 @@ def DispatchLoweringPassPipelineEnum
                     LLVMGPU_TransposeSharedMem, LLVMGPU_WarpReduction,
                     SPIRV_BaseDistribute, SPIRV_BaseVectorize,
                     SPIRV_MatmulPromoteVectorize, SPIRV_CooperativeMatrixVectorize,
-                    SPIRV_SubgroupReduce,
+                    SPIRV_SubgroupReduce, SPIRV_WinogradVectorize,
                     VMVX_Default,
                     // Transform dialect based codegen
                     Linalg_TransformInterpCodegen,
@@ -114,7 +116,7 @@ def IREECodegen_TranslationInfoAttr :
   let assemblyFormat = [{
     `<` `` $passPipeline
     (`pipeline_depth` `=` $softwarePipelineDepth^)?
-    (`transform_name` `=` $transfromStrategyName^)? `>`
+    (`store_stage` `=` $softwarePipelineStoreStage^)? `>`
   }];
 
   let parameters = (ins
@@ -122,13 +124,13 @@ def IREECodegen_TranslationInfoAttr :
         "Name of the pipeline to be invoked on the translation unit.">:$passPipeline,
     OptionalParameter<"unsigned",
         "The software pipeline depth to be used">:$softwarePipelineDepth,
-    OptionalParameter<"StringAttr",
-        "Name of the transform startegy to apply">:$transfromStrategyName
+    DefaultValuedParameter<"unsigned", "1",
+        "The software pipeline stage to place stores">:$softwarePipelineStoreStage
   );
   let builders = [
     AttrBuilder<(ins "DispatchLoweringPassPipeline":$passPipeline,
         CArg<"unsigned", "0">:$softwarePipelineDepth,
-        CArg<"StringAttr", "StringAttr()">:$transfromStrategyName)>
+        CArg<"unsigned", "1">:$softwarePipelineStoreStage)>
   ];
   let extraClassDeclaration = [{
     // Returns the lowering pass pipeline set.

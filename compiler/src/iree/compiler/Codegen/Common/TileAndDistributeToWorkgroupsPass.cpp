@@ -82,17 +82,7 @@ static LogicalResult getTileAndDistributeConfig(
   }
 
   partitionableLoops =
-      partitionableLoopInterface.getPartitionableLoops(kNumMaxParallelDims);
-  // For now assert that number of partitionable loops are less than the
-  // supported max.
-  // TODO(ravishankarm): Relax this restriction.
-  if (partitionableLoops.size() > kNumMaxParallelDims) {
-    return rootOp.value()->emitOpError(
-               "expected number of partitionable loops to be less than or "
-               "equal to ")
-           << kNumMaxParallelDims;
-  }
-
+      partitionableLoopInterface.getPartitionableLoops(llvm::None);
   IREE::Codegen::LoweringConfigAttr rootOpConfig = getLoweringConfig(*rootOp);
   if (!rootOpConfig) {
     return rootOp.value()->emitOpError(
@@ -114,7 +104,7 @@ static LogicalResult getTileAndDistributeConfig(
   if (auto linalgOp = dyn_cast<linalg::LinalgOp>(*rootOp)) {
     staticLoopRanges = linalgOp.getStaticLoopRanges();
   }
-  staticLoopRanges.resize(tileSizes.size(), ShapedType::kDynamicSize);
+  staticLoopRanges.resize(tileSizes.size(), ShapedType::kDynamic);
 
   return success();
 }
@@ -133,12 +123,8 @@ getMaterializationInfo(IREE::LinalgExt::PackOp packOp) {
     encodingInfo.innerTileSizes.push_back(
         tileSize.get<Attribute>().cast<IntegerAttr>().getInt());
   }
-  encodingInfo.innerDimsPos = llvm::to_vector(llvm::map_range(
-      packOp.getInnerDimsPos(),
-      [](Attribute attr) { return attr.cast<IntegerAttr>().getInt(); }));
-  encodingInfo.outerDimsPerm = llvm::to_vector(llvm::map_range(
-      packOp.getOuterDimsPerm(),
-      [](Attribute attr) { return attr.cast<IntegerAttr>().getInt(); }));
+  encodingInfo.innerDimsPos = llvm::to_vector(packOp.getInnerDimsPos());
+  encodingInfo.outerDimsPerm = llvm::to_vector(packOp.getOuterDimsPerm());
   return encodingInfo;
 }
 
@@ -176,7 +162,7 @@ struct LowerDispatchWorkgroupCountForDagRootOp
     Attribute zero = rewriter.getIndexAttr(0);
     tileSizes.resize(workloadValues.size(), zero);
     SmallVector<int64_t> staticLoopRanges = givenStaticLoopRanges;
-    staticLoopRanges.resize(workloadValues.size(), ShapedType::kDynamicSize);
+    staticLoopRanges.resize(workloadValues.size(), ShapedType::kDynamic);
     Location loc = workgroupCountOp.getLoc();
     auto numTiles = llvm::to_vector(llvm::map_range(
         llvm::zip(workloadValues, staticLoopRanges, tileSizes),
@@ -188,7 +174,7 @@ struct LowerDispatchWorkgroupCountForDagRootOp
 
           int64_t staticLoopRange = std::get<1>(p);
           OpFoldResult workload =
-              (staticLoopRange == ShapedType::kDynamicSize
+              (staticLoopRange == ShapedType::kDynamic
                    ? OpFoldResult(std::get<0>(p))
                    : OpFoldResult(rewriter.getIndexAttr(staticLoopRange)));
           AffineExpr s0, s1;
@@ -212,8 +198,18 @@ struct LowerDispatchWorkgroupCountForDagRootOp
     // slowest varying.
     SmallVector<Value> numWorkgroups;
     for (auto partitionedLoop : llvm::reverse(partitionedLoops)) {
-      numWorkgroups.push_back(getValueOrCreateConstantIndexOp(
-          rewriter, loc, numTiles[partitionedLoop]));
+      Value numTileAlongDim = getValueOrCreateConstantIndexOp(
+          rewriter, loc, numTiles[partitionedLoop]);
+      if (numWorkgroups.size() == kNumMaxParallelDims) {
+        // IREE runtime only has 3 ID dimensions. After all the num of tiles are
+        // combined into one.
+        AffineExpr s0 = rewriter.getAffineSymbolExpr(0);
+        AffineExpr s1 = rewriter.getAffineSymbolExpr(1);
+        numWorkgroups.back() = makeComposedAffineApply(
+            rewriter, loc, s0 * s1, {numWorkgroups.back(), numTileAlongDim});
+        continue;
+      }
+      numWorkgroups.push_back(numTileAlongDim);
     }
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     numWorkgroups.resize(kNumMaxParallelDims, one);
@@ -378,7 +374,8 @@ void TileAndDistributeToWorkgroupsPass::runOnOperation() {
 
     auto linalgTilingOptions =
         linalg::LinalgTilingOptions()
-            .setDistributionOptions(getIREELinalgLoopDistributionOptions())
+            .setDistributionOptions(
+                getIREELinalgLoopDistributionOptions(tileSizes))
             .setInterchange(llvm::to_vector<4>(
                 llvm::map_range(interchange,
                                 [](int64_t v) -> unsigned {

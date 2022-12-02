@@ -384,9 +384,9 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    I64ArrayAttr:$static_offsets,
-    I64ArrayAttr:$static_sizes,
-    I64ArrayAttr:$static_strides
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
   );
   let results = (outs
     AnyRankedTensor:$result
@@ -395,11 +395,11 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
   let assemblyFormat = [{
     $source
     `,` `offsets` `=` custom<DynamicIndexList>(
-      $offsets, $static_offsets, "ShapedType::kDynamicStrideOrOffset")
+      $offsets, $static_offsets)
     `,` `sizes` `=` custom<DynamicIndexList>(
-      $sizes, $static_sizes, "ShapedType::kDynamicSize")
+      $sizes, $static_sizes)
     `,` `strides` `=` custom<DynamicIndexList>(
-      $strides, $static_strides, "ShapedType::kDynamicStrideOrOffset")
+      $strides, $static_strides)
     attr-dict `:` type($source) (`{` $source_dims^ `}`)?  `->` type($result)
   }];
 
@@ -448,11 +448,8 @@ def FLOW_DispatchTensorLoadOp : FLOW_PureOp<"dispatch.tensor.load", [
     // Workaround for OffsetSizeAndStrideOpInterface being incompatible with
     // prefixed accessors.
     OperandRange offsets() { return getOffsets(); }
-    ArrayAttr static_offsets() { return getStaticOffsets(); }
     OperandRange sizes() { return getSizes(); }
-    ArrayAttr static_sizes() { return getStaticSizes(); }
     OperandRange strides() { return getStrides(); }
-    ArrayAttr static_strides() { return getStaticStrides(); }
 
     /// Returns the type of the result based on the sizes.
     static RankedTensorType inferResultType
@@ -506,20 +503,20 @@ def FLOW_DispatchTensorStoreOp : FLOW_Op<"dispatch.tensor.store", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    I64ArrayAttr:$static_offsets,
-    I64ArrayAttr:$static_sizes,
-    I64ArrayAttr:$static_strides
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
   );
   let results = (outs);
 
   let assemblyFormat = [{
     $value `,` $target
     `,` `offsets` `=` custom<DynamicIndexList>(
-      $offsets, $static_offsets, "ShapedType::kDynamicStrideOrOffset")
+      $offsets, $static_offsets)
     `,` `sizes` `=` custom<DynamicIndexList>(
-      $sizes, $static_sizes, "ShapedType::kDynamicSize")
+      $sizes, $static_sizes)
     `,` `strides` `=` custom<DynamicIndexList>(
-      $strides, $static_strides, "ShapedType::kDynamicStrideOrOffset")
+      $strides, $static_strides)
     attr-dict `:` type($value) `->` type($target) (`{` $target_dims^ `}`)?
   }];
 
@@ -568,11 +565,8 @@ def FLOW_DispatchTensorStoreOp : FLOW_Op<"dispatch.tensor.store", [
     // Workaround for OffsetSizeAndStrideOpInterface being incompatible with
     // prefixed accessors.
     OperandRange offsets() { return getOffsets(); }
-    ArrayAttr static_offsets() { return getStaticOffsets(); }
     OperandRange sizes() { return getSizes(); }
-    ArrayAttr static_sizes() { return getStaticSizes(); }
     OperandRange strides() { return getStrides(); }
-    ArrayAttr static_strides() { return getStaticStrides(); }
 
     ValueRange getOperandDynamicDims(unsigned idx) {
       return idx == 0 ? getSizes() : getTargetDims();

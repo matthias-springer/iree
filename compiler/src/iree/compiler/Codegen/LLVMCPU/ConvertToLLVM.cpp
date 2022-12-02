@@ -42,6 +42,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -1122,16 +1123,9 @@ class ConvertToLLVMPass : public ConvertToLLVMBase<ConvertToLLVMPass> {
 
 static std::string getStringAttrFromTargetAttr(ModuleOp module,
                                                StringRef attrName) {
-  if (auto variantOp =
-          module->getParentOfType<IREE::HAL::ExecutableVariantOp>()) {
-    IREE::HAL::ExecutableTargetAttr targetAttr = variantOp.getTarget();
-    if (auto config = targetAttr.getConfiguration()) {
-      if (auto attr = config.getAs<StringAttr>(attrName)) {
-        return attr.getValue().str();
-      }
-    }
-  }
-  return "";
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module);
+  auto stringAttr = getConfigStringAttr(targetAttr, attrName);
+  return stringAttr ? stringAttr.value().str() : std::string("");
 }
 
 void ConvertToLLVMPass::runOnOperation() {
@@ -1194,13 +1188,13 @@ void ConvertToLLVMPass::runOnOperation() {
   //
   // TODO(bjacob): Use a lowering that uses specific ARM/X86 intrinsics.
   bool use32BitImpl = false;
-  auto variantOp = getExecutableVariantOp(module);
-  if (succeeded(variantOp) && isRISCV(*variantOp)) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module);
+  if (isRISCV(targetAttr)) {
     // Use the 32-bit lowering for RISC-V if 'zve32x' is specified and there is
     // no 64-bit integer vector support.
     // TODO(#9440) Simplify logic when 'cpu_features' is simplified.
-    use32BitImpl = hasZve32xFeature(*variantOp) && !hasVFeature(*variantOp) &&
-                   !hasZve64xFeature(*variantOp);
+    use32BitImpl = hasZve32xFeature(targetAttr) && !hasVFeature(targetAttr) &&
+                   !hasZve64xFeature(targetAttr);
   }
   tosa::populateTosaRescaleToArithConversionPatterns(&patterns, use32BitImpl);
 
@@ -1211,6 +1205,7 @@ void ConvertToLLVMPass::runOnOperation() {
 
   populateComplexToLLVMConversionPatterns(converter, patterns);
   populateMathToLLVMConversionPatterns(converter, patterns);
+  memref::populateExpandStridedMetadataPatterns(patterns);
   populateMemRefToLLVMConversionPatterns(converter, patterns);
   populateFuncToLLVMConversionPatterns(converter, patterns);
   arith::populateArithToLLVMConversionPatterns(converter, patterns);

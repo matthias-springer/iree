@@ -40,6 +40,7 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 }
 
 //   CHECK-LABEL:  func.func @warp_reduction_dispatch
+//     CHECK-DAG:    %[[C0I:.+]] = arith.constant 0 : i32
 //     CHECK-DAG:    %[[C0:.+]] = arith.constant 0 : index
 //     CHECK-DAG:    %[[C1:.+]] = arith.constant 1 : i32
 //     CHECK-DAG:    %[[C2:.+]] = arith.constant 2 : i32
@@ -47,7 +48,6 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //     CHECK-DAG:    %[[C8:.+]] = arith.constant 8 : i32
 //     CHECK-DAG:    %[[C16:.+]] = arith.constant 16 : i32
 //     CHECK-DAG:    %[[C32:.+]] = arith.constant 32 : i32
-//     CHECK-DAG:    %[[C16I:.+]] = arith.constant 16 : index
 //     CHECK-DAG:    %[[C32I:.+]] = arith.constant 32 : index
 //     CHECK-DAG:    %[[C2048:.+]] = arith.constant 2048 : index
 //     CHECK-DAG:    %[[C10240:.+]] = arith.constant 10240 : index
@@ -73,23 +73,23 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //         CHECK:    %[[R6:.+]] = arith.addf %[[R5]], %[[S4]] : f32
 //         CHECK:    %[[ALLOC:.+]] = memref.alloc() : memref<16xf32, 3>
 //         CHECK:    %[[WID:.+]] = arith.divui %{{.*}}, %{{.*}} : index
-//         CHECK:    memref.store %[[R6]], %[[ALLOC]][%[[WID]]] : memref<16xf32, 3>
+//         CHECK:    %[[LANE_ID:.*]] = arith.remui %[[TID]], %[[C32I]] : index
+//         CHECK:    %[[LANE0:.*]] = arith.cmpi eq, %[[LANE_ID]], %[[C0]] : index
+//         CHECK:    scf.if %[[LANE0]] { 
+//         CHECK:      memref.store %[[R6]], %[[ALLOC]][%[[WID]]] : memref<16xf32, 3>
+//         CHECK:    }
 //         CHECK:    gpu.barrier
-//         CHECK:    %[[LANE_ID:.+]] = arith.remui %[[TID]], %[[C32I]] : index
 //         CHECK:    %[[LOAD_VAL:.+]] = memref.load %[[ALLOC]][%[[LANE_ID]]] : memref<16xf32, 3>
-//         CHECK:    %[[USE_IDENTITY:.+]] = arith.cmpi sge, %[[LANE_ID]], %[[C16I]] : index
-//         CHECK:    %[[LANE_VAL:.+]] = arith.select %[[USE_IDENTITY]], %[[IDENTITY]], %[[LOAD_VAL]] : f32
-//         CHECK:    %[[S5:.+]], %{{.*}} = gpu.shuffle  xor %[[LANE_VAL]], %[[C1]], %[[C32]] : f32
-//         CHECK:    %[[R7:.+]] = arith.addf %[[LANE_VAL]], %[[S5]] : f32
+//         CHECK:    %[[S5:.+]], %{{.*}} = gpu.shuffle  xor %[[LOAD_VAL]], %[[C1]], %[[C32]] : f32
+//         CHECK:    %[[R7:.+]] = arith.addf %[[LOAD_VAL]], %[[S5]] : f32
 //         CHECK:    %[[S6:.+]], %{{.*}} = gpu.shuffle  xor %[[R7]], %[[C2]], %[[C32]] : f32
 //         CHECK:    %[[R8:.+]] = arith.addf %[[R7]], %[[S6]] : f32
 //         CHECK:    %[[S7:.+]], %{{.*}} = gpu.shuffle  xor %[[R8]], %[[C4]], %[[C32]] : f32
 //         CHECK:    %[[R9:.+]] = arith.addf %[[R8]], %[[S7]] : f32
 //         CHECK:    %[[S8:.+]], %{{.*}} = gpu.shuffle  xor %[[R9]], %[[C8]], %[[C32]] : f32
-//         CHECK:    %[[R10:.+]] = arith.addf %[[R9]], %[[S8]] : f32
-//         CHECK:    %[[S9:.+]], %{{.*}} = gpu.shuffle  xor %[[R10]], %[[C16]], %[[C32]] : f32
-//         CHECK:    %[[R11:.+]] = arith.addf %[[R10]], %[[S9]] : f32
-//         CHECK:    %[[R12:.+]] = arith.addf %[[R11]], %[[CF]] : f32
+//         CHECK:    %[[R11:.+]] = arith.addf %[[R9]], %[[S8]] : f32
+//         CHECK:    %[[S9:.+]], %{{.*}} = gpu.shuffle  idx %[[R11]], %[[C0I]], %[[C32]] : f32
+//         CHECK:    %[[R12:.+]] = arith.addf %[[S9]], %[[CF]] : f32
 //         CHECK:    %[[R13:.+]] = vector.broadcast %[[R12]] : f32 to vector<1xf32>
 //         CHECK:    %[[TID0:.+]] = arith.cmpi eq, %[[TID]], %[[C0]] : index
 //         CHECK:    scf.if %[[TID0]] {
@@ -164,14 +164,12 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //         CHECK:    arith.addf
 //         CHECK:    gpu.shuffle  xor
 //         CHECK:    arith.addf
-//         CHECK:    memref.store {{.*}} : memref<16xf32, 3>
-//         CHECK:    gpu.barrier
 //         CHECK:    arith.remui
+//         CHECK:    scf.if
+//         CHECK:      memref.store {{.*}} : memref<16xf32, 3>
+//         CHECK:    }
+//         CHECK:    gpu.barrier
 //         CHECK:    memref.load
-//         CHECK:    arith.cmpi
-//         CHECK:    arith.select
-//         CHECK:    gpu.shuffle  xor
-//         CHECK:    arith.addf
 //         CHECK:    gpu.shuffle  xor
 //         CHECK:    arith.addf
 //         CHECK:    gpu.shuffle  xor
@@ -182,7 +180,7 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //         CHECK:    arith.addf
 //         CHECK:    arith.addf
 //         CHECK:    vector.broadcast %{{.*}} : f32 to vector<4xf32>
-//         CHECK:    %22 = arith.divf {{.*}} : vector<4xf32>
+//         CHECK:    arith.divf {{.*}} : vector<4xf32>
 //         CHECK:    scf.for
 //         CHECK:      vector.transfer_write {{.*}} : vector<4xf32>, memref<512x10240xf32>
 //         CHECK:    }

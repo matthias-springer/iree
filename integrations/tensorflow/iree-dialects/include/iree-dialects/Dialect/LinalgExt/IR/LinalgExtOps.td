@@ -17,12 +17,12 @@ include "mlir/Interfaces/TilingInterface.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
 
 
-def IREELinalgExt_DoNotDCEOperandsOp : 
+def IREELinalgExt_DoNotDCEOperandsOp :
   Op<IREELinalgExt_Dialect, "transform.do_not_dce_operands", []> {
   let summary = "Unfoldable op that just keeps its operands live";
   let description = [{
-    Unfoldable op that just keeps its operands live. This is to use with the 
-    transform dialect in case where transforms introduce IR that would be 
+    Unfoldable op that just keeps its operands live. This is to use with the
+    transform dialect in case where transforms introduce IR that would be
     otherwise DCE'd by canonicalizations.
 
     This op should be added to the transform dialect in the fullness of time but
@@ -108,7 +108,7 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
   let arguments = (ins
       Variadic<AnyRankedTensorOrMemRefType>:$inputs,
       Variadic<AnyRankedTensorOrMemRefType>:$outputs,
-      I64ArrayAttr:$dimension_map,
+      DenseI64ArrayAttr:$dimension_map,
       DefaultValuedAttr<BoolAttr, "true">:$unique_indices
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
@@ -161,10 +161,6 @@ def IREELinalgExt_ScatterOp : IREELinalgExt_Op<"scatter",
 
     bool isScalarUpdate() {
       return getUpdateSliceRank() == 0;
-    }
-
-    SmallVector<int64_t> dimensionMap() {
-      return extractFromI64ArrayAttr(getDimensionMap());
     }
 
     // Method to implement for specifying output range for
@@ -578,10 +574,10 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
 
   let arguments = (ins Variadic<AnyShaped>:$inputs,
     Variadic<AnyShaped>:$outputs,
-    DefaultValuedOptionalAttr<I64ArrayAttr, "{}">:$outer_dims_perm,
-    I64ArrayAttr:$inner_dims_pos,
+    DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$outer_dims_perm,
+    DenseI64ArrayAttr:$inner_dims_pos,
     Variadic<Index>:$inner_tiles,
-    I64ArrayAttr:$static_inner_tiles,
+    DenseI64ArrayAttr:$static_inner_tiles,
     Optional<AnyType>:$padding_value);
 
   let results = (outs Variadic<AnyRankedTensor>:$results);
@@ -593,7 +589,7 @@ def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
     `inner_dims_pos` `=` $inner_dims_pos
     `inner_tiles` `=`
     custom<DynamicIndexList>($inner_tiles, $static_inner_tiles,
-                             "ShapedType::kDynamicSize")
+                             "ShapedType::kDynamic")
     `into` $outputs `:` `(` type($inputs) type($outputs) `)`
      (`->` type($results)^)?
   }];
@@ -732,10 +728,10 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
 
   let arguments = (ins Variadic<AnyShaped>:$inputs,
     Variadic<AnyShaped>:$outputs,
-    DefaultValuedOptionalAttr<I64ArrayAttr, "{}">:$outer_dims_perm,
-    DefaultValuedAttr<I64ArrayAttr, "{}">:$inner_dims_pos,
+    DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$outer_dims_perm,
+    DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$inner_dims_pos,
     Variadic<Index>:$inner_tiles,
-    I64ArrayAttr:$static_inner_tiles);
+    DenseI64ArrayAttr:$static_inner_tiles);
 
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let assemblyFormat = [{
@@ -745,7 +741,7 @@ def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
     `inner_dims_pos` `=` $inner_dims_pos
     `inner_tiles` `=`
     custom<DynamicIndexList>($inner_tiles, $static_inner_tiles,
-                             "ShapedType::kDynamicSize")
+                             "ShapedType::kDynamic")
     `into` $outputs `:` `(` type($inputs) type($outputs) `)`
      (`->` type($results)^)?
   }];

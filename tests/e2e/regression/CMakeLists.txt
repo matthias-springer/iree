@@ -26,6 +26,8 @@ iree_lit_test_suite(
     iree-opt
     iree-run-mlir
   LABELS
+    "driver=local-task"
+    "driver=vulkan"
     "hostonly"
 )
 
@@ -169,6 +171,20 @@ iree_check_single_backend_test_suite(
     "local-task"
   COMPILER_FLAGS
     "-iree-flow-demote-f64-to-f32=false"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
+    aggressive_fusion_test
+  SRCS
+    "softmax.mlir"
+  TARGET_BACKEND
+    "llvm-cpu"
+  DRIVER
+    "local-task"
+  COMPILER_FLAGS
+    "--iree-flow-enable-aggressive-fusion"
+    "--iree-llvmcpu-fail-on-out-of-bounds-stack-allocation=false"
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

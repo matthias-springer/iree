@@ -14,6 +14,7 @@ iree_lit_test_suite(
   NAME
     lit
   SRCS
+    "compile_to_phase.mlir"
     "executable_benchmarks.mlir"
     "iree-benchmark-module.mlir"
     "iree-run-mlir.mlir"
@@ -33,6 +34,8 @@ iree_lit_test_suite(
     iree-run-module
     not
   LABELS
+    "driver=local-task"
+    "driver=vulkan"
     "hostonly"
 )
 

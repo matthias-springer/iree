@@ -106,7 +106,8 @@ createRemoveSingleIterationLoopPass();
 /// destination-passing style, which is better suited for the upstream
 /// comprehensive bufferization pass.
 std::unique_ptr<OperationPass<func::FuncOp>>
-createConvertToDestinationPassingStylePass();
+createConvertToDestinationPassingStylePass(
+    bool useWARForCooperativeMatrixCodegen = false);
 
 /// Creates a pass to vectorize a very specific form of tensor.pad ops with
 /// control flows.
@@ -155,7 +156,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> createGPUMultiBuffering(
 
 /// Apply software pipelining.
 std::unique_ptr<OperationPass<func::FuncOp>> createGPUPipeliningPass(
-    bool epiloguePeeling = true, unsigned depth = 1);
+    bool epiloguePeeling = true, unsigned depth = 1, unsigned storeStage = 1);
 
 /// Converts vector ops to gpu dialect.
 std::unique_ptr<OperationPass<func::FuncOp>> createWorkGroupSwizzle(
@@ -198,6 +199,11 @@ createConcretizePadResultShapePass();
 /// operations are backend specific.
 std::unique_ptr<OperationPass<func::FuncOp>>
 createIREEMaterializeEncodingPass();
+
+/// Erases #hal.descriptor_type as MemRef memory space.
+LogicalResult eraseHALDescriptorTypeFromMemRef(func::FuncOp funcOp);
+std::unique_ptr<OperationPass<func::FuncOp>>
+createEraseHALDescriptorTypeFromMemRefPass();
 
 //----------------------------------------------------------------------------//
 // Common codegen patterns.
@@ -479,6 +485,10 @@ void addSPIRVBaseVectorizePassPipeline(OpPassManager &pm);
 /// Pass pipeline to lower IREE HAL executables by tiling and distributing
 /// to workgroups and subgroups and then vectorizing to SPIR-V cooperative
 /// matrix code.
+LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
+    Operation *op, IREE::Codegen::LoweringConfigAttr loweringConfig,
+    IREE::Codegen::TranslationInfoAttr translationInfo,
+    ArrayRef<int64_t> workgroupSize);
 void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm);
 
 /// Pass pipeline to lower IREE HAL executables by tiling and distributing to
@@ -490,7 +500,8 @@ LogicalResult verifySPIRVMatmulPromoteVectorizePassPipeline(
     IREE::Codegen::TranslationInfoAttr translationInfo,
     ArrayRef<int64_t> workgroupSize);
 void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
-                                                unsigned pipelineDepth);
+                                                unsigned pipelineDepth,
+                                                unsigned storeStage);
 
 /// Pass pipeline to lower IREE HAL executables by tiling and distributing
 /// reduction to workgroups and then subgroups.
@@ -559,6 +570,21 @@ createSPIRVCreateFastSlowPathPass();
 
 /// Emulates 64-bit integer ops with 32-bit integer ops.
 std::unique_ptr<OperationPass<ModuleOp>> createSPIRVEmulateI64Pass();
+
+/// Pass to map MemRef memory spaces to SPIR-V storage classes.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createSPIRVMapMemRefStorageClassPass();
+
+/// Pass pipeline to lower winograd ops. This pipeline follows the
+/// SPIRVBaseVectorize pipeline with the following exception:
+/// Since the ops are already tiled, we skip tiling and instead
+/// just annotate the loops with the spirv distribute attribute.
+///
+void addSPIRVWinogradVectorizePassPipeline(OpPassManager &pm);
+
+/// Annotates the innermost Winograd loops with the spirv distribute attribute.
+std::unique_ptr<OperationPass<func::FuncOp>>
+createSPIRVAnnotateWinogradLoopsPass();
 
 //----------------------------------------------------------------------------//
 // SPIRV Codegen Pass Pipelines.

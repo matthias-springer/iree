@@ -75,10 +75,11 @@ namespace Codegen {
 
 TranslationInfoAttr TranslationInfoAttr::get(
     MLIRContext *context, DispatchLoweringPassPipeline passPipeline,
-    unsigned softwarePipelineDepth, StringAttr strategyName) {
+    unsigned softwarePipelineDepth, unsigned softwarePipelineStoreStage) {
   auto pipelineAttr =
       DispatchLoweringPassPipelineAttr::get(context, passPipeline);
-  return get(context, pipelineAttr, softwarePipelineDepth, strategyName);
+  return get(context, pipelineAttr, softwarePipelineDepth,
+             softwarePipelineStoreStage);
 }
 
 DispatchLoweringPassPipeline
@@ -89,7 +90,7 @@ TranslationInfoAttr::getDispatchLoweringPassPipeline() {
 LogicalResult TranslationInfoAttr::verify(
     function_ref<InFlightDiagnostic()> emitError,
     IREE::Codegen::DispatchLoweringPassPipelineAttr passPipeline,
-    unsigned softwarePipelineDepth, StringAttr strategyName) {
+    unsigned softwarePipelineDepth, unsigned softwarePipelineStoreStage) {
   if (!passPipeline) {
     return emitError() << "missing pass pipeline specification";
   }
@@ -213,7 +214,7 @@ LogicalResult CompilationInfoAttr::verify(
   if (failed(TranslationInfoAttr::verify(
           emitError, translationInfo.getPassPipeline(),
           translationInfo.getSoftwarePipelineDepth(),
-          translationInfo.getTransfromStrategyName()))) {
+          translationInfo.getSoftwarePipelineStoreStage()))) {
     return failure();
   }
   if (workgroupSize) {
@@ -262,16 +263,23 @@ SmallVector<int64_t> getWorkgroupSize(IREE::HAL::ExecutableExportOp exportOp) {
   return {};
 }
 
-void setTranslationInfo(IREE::HAL::ExecutableExportOp exportOp,
-                        IREE::Codegen::TranslationInfoAttr translationInfo,
-                        ArrayRef<int64_t> workgroupSize) {
-  exportOp->setAttr(kTranslationInfoAttrName, translationInfo);
-  // The workgroup size is set on the entry point op directly.
-  if (!workgroupSize.empty()) {
-    MLIRContext *context = exportOp->getContext();
-    auto attrs = getIndexIntegerArrayAttr(context, workgroupSize);
-    exportOp.setWorkgroupSizeAttr(attrs);
-  }
+LogicalResult setWorkgroupSize(func::FuncOp entryPoint,
+                               ArrayRef<int64_t> workgroupSize) {
+  FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(entryPoint);
+  if (failed(exportOp)) return failure();
+  if (workgroupSize.empty()) return success();
+  auto attr = getIndexIntegerArrayAttr(exportOp->getContext(), workgroupSize);
+  exportOp->setWorkgroupSizeAttr(attr);
+  return success();
+}
+
+LogicalResult setTranslationInfo(
+    func::FuncOp entryPoint,
+    IREE::Codegen::TranslationInfoAttr translationInfo) {
+  FailureOr<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(entryPoint);
+  if (failed(exportOp)) return failure();
+  exportOp.value()->setAttr(kTranslationInfoAttrName, translationInfo);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

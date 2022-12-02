@@ -16,6 +16,7 @@
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TargetSelect.h"
@@ -32,8 +33,6 @@
 #define DEBUG_TYPE "kernel-dispatch"
 #define KD_DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
 
-static constexpr llvm::StringLiteral kReductionStrategyName =
-    "reduction_strategy";
 namespace mlir {
 namespace iree_compiler {
 
@@ -180,38 +179,31 @@ static VectorPreProcStrategy getVectorPreProcStrategy(
     return VectorPreProcStrategy::Peeling;
   }
 
-  auto maybeVariantOp = getExecutableVariantOp(linalgOp);
-  assert(succeeded(maybeVariantOp) && "ExecutableVariantOp not found");
-  auto variantOp = *maybeVariantOp;
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(linalgOp);
 
   // Default X86 specific strategy.
-  if (isX86(variantOp) && enableVectorPadding) {
+  if (isX86(targetAttr) && enableVectorPadding) {
     // Padding is only enabled on x86. It leads to too much overhead on RISC-V
     // and ARM.
     return VectorPreProcStrategy::Padding;
   }
 
   // Default RISC-V specific strategies.
-  if (isRISCV(variantOp) && enableVectorPeeling) {
+  if (isRISCV(targetAttr) && enableVectorPeeling) {
     return VectorPreProcStrategy::Peeling;
   }
 
   return VectorPreProcStrategy::None;
 }
 
-/// Looks for the `native_vector_size` attribute in the hal.executable.variant
-/// op.
+/// Looks for the `native_vector_size` attribute in the hal.executable.target
+/// looked up from this op.
 static Optional<int64_t> getNativeVectorSizeInBytes(func::FuncOp entryPointFn) {
-  auto variantOp =
-      entryPointFn->getParentOfType<IREE::HAL::ExecutableVariantOp>();
-  if (!variantOp) return llvm::None;
-  IREE::HAL::ExecutableTargetAttr targetAttr = variantOp.getTarget();
-  if (!targetAttr) return llvm::None;
-  auto config = targetAttr.getConfiguration();
-  if (!config) return llvm::None;
-  auto nativeVectorSizeAttr = config.getAs<IntegerAttr>("native_vector_size");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
+  auto nativeVectorSizeAttr =
+      getConfigIntegerAttr(targetAttr, "native_vector_size");
   if (!nativeVectorSizeAttr) return llvm::None;
-  int64_t nativeVectorSizeVal = nativeVectorSizeAttr.getInt();
+  int64_t nativeVectorSizeVal = nativeVectorSizeAttr->getInt();
   if (!nativeVectorSizeVal) return llvm::None;
   return nativeVectorSizeVal;
 }
@@ -344,7 +336,7 @@ static SmallVector<int64_t> getDefaultDistributedLoopTileSizes(
     if (maxTileSizes[i] == 0 || ShapedType::isDynamic(lbs[i]) ||
         ShapedType::isDynamic(ubs[i])) {
       distributedTileSizes[i] = maxTileSizes[i];
-      workload[i] = ShapedType::kDynamicSize;
+      workload[i] = ShapedType::kDynamic;
       continue;
     }
 
@@ -387,7 +379,7 @@ static SmallVector<int64_t> getDefaultDistributedLoopTileSizes(
   while (numWorkgroups > numWorkgroupsLimit && currDim > 0) {
     unsigned index = currDim - 1;
     int64_t currSize = distributedTileSizes[index];
-    if (workload[index] == ShapedType::kDynamicSize ||
+    if (workload[index] == ShapedType::kDynamic ||
         currSize >= maxTileSizes[index] || currSize >= workload[index]) {
       currDim--;
       continue;
@@ -423,7 +415,7 @@ static SmallVector<int64_t> getDefaultDistributedLoopTileSizes(
 static int64_t getMaxTileSize(int64_t lb, int64_t ub, int64_t maxSize,
                               int64_t vectorSize,
                               bool allowIncompleteTile = false) {
-  if (ub == ShapedType::kDynamicSize || lb == ShapedType::kDynamicSize) {
+  if (ub == ShapedType::kDynamic || lb == ShapedType::kDynamic) {
     return maxSize;
   }
   int64_t numIters = ub - lb;
@@ -688,7 +680,7 @@ static bool isNoPadMultiTilingBeneficial(linalg::ContractionOpInterface op,
 
   SmallVector<int64_t> shape = linalgOp.getStaticLoopRanges();
   if (llvm::any_of(shape,
-                   [](int64_t v) { return v == ShapedType::kDynamicSize; })) {
+                   [](int64_t v) { return v == ShapedType::kDynamic; })) {
     return false;
   }
 
@@ -741,7 +733,7 @@ static LogicalResult setMatmulNoPadRootConfig(
       // Quantized cases are not fully evaluated yet, so it might go with NoPad
       // approach.
       int idx = en.index();
-      if (en.value() == 0 || shape[idx] == ShapedType::kDynamicSize) continue;
+      if (en.value() == 0 || shape[idx] == ShapedType::kDynamic) continue;
       assert(shape[idx] % en.value() == 0);
       shape[idx] = en.value();
     }
@@ -822,13 +814,13 @@ static LogicalResult setAArch64RootConfig(func::FuncOp entryPointFn,
 static void getDefaultMatmulWorkgroupSizes(linalg::LinalgOp op,
                                            SmallVectorImpl<int64_t> &sizes,
                                            int64_t vectorSize) {
-  auto variantOp = getExecutableVariantOp(op);
-  if (isX86(*variantOp)) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(op);
+  if (isX86(targetAttr)) {
     sizes.append({8, 32, 16});
     return;
   }
 
-  if (isRISCV(*variantOp)) {
+  if (isRISCV(targetAttr)) {
     // RISC-V natively supports scalar x vector operations so we don't have to
     // vectorize dimension k. Vectorizing dimension k results in a vector load
     // and a sequence of vrgather ops to implemement the broadcast explicitly.
@@ -849,13 +841,12 @@ static SmallVector<int64_t> getMatmulWorkgroupSizes(func::FuncOp entryPointFn,
                                                     int64_t vectorSize,
                                                     bool isQuantized) {
   SmallVector<int64_t> matmulTileSizes;
-  auto variantOp = getExecutableVariantOp(entryPointFn);
-  assert(succeeded(variantOp) && "ExecutableVariantOp not found");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
 
   // Compute workgroup tile sizes using heuristics.
-  // TODO: if (isX86(*variantOp) || isRISCV(*variantOp)) {
+  // TODO: if (isX86(targetAttr) || isRISCV(targetAttr)) {
 
-  if (isAArch64(*variantOp)) {
+  if (isAArch64(targetAttr)) {
     if (isQuantized) {
       matmulTileSizes = {vectorSize, vectorSize * 4, vectorSize};
     } else {
@@ -913,12 +904,11 @@ static LogicalResult setRootConfig(
   SmallVector<int64_t> workgroupTileSizes =
       getMatmulWorkgroupSizes(entryPointFn, linalgOp, vectorSize, isQuantized);
 
-  auto variantOp = getExecutableVariantOp(entryPointFn);
-  assert(succeeded(variantOp) && "ExecutableVariantOp not found");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
 
   // Use the default distribution for the matmul loops.
   int64_t defaultMaxSize = defaultWorkgroupTileSize;
-  if (isX86(*variantOp) || isRISCV(*variantOp)) {
+  if (isX86(targetAttr) || isRISCV(targetAttr)) {
     defaultMaxSize = 128;
   }
 
@@ -962,7 +952,7 @@ static LogicalResult setRootConfig(
   // ARM codgen does not switch to use codegen driver based approach, so we have
   // special logic for it. All the new pipeline is expected to use codegen
   // driver based approach.
-  if (isAArch64(*variantOp) && !isQuantized) {
+  if (isAArch64(targetAttr) && !isQuantized) {
     return setAArch64RootConfig(entryPointFn, contractionOp, flowTileSizes,
                                 workgroupTileSizes, vectorSize);
   }
@@ -1050,6 +1040,7 @@ static SmallVector<int64_t> getLinalgExtDefaultWorkgroupTileSizes(
       workgroupTileSizes[dim] = 0;
     }
   }
+
   return workgroupTileSizes;
 }
 
@@ -1058,6 +1049,27 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
   TileSizesListType tileSizes = {getLinalgExtDefaultWorkgroupTileSizes(op)};
   return setOpConfigAndEntryPointFnTranslation(
       entryPointFn, op, tileSizes, DispatchLoweringPassPipeline::CPUDataTiling);
+}
+
+static LogicalResult setRootConfig(
+    func::FuncOp entryPointFn, IREE::LinalgExt::UnPackOp op,
+    DispatchLoweringPassPipeline pipeline =
+        DispatchLoweringPassPipeline::CPUDataTiling) {
+  SmallVector<int64_t> tileSizes = getLinalgExtDefaultWorkgroupTileSizes(op);
+
+  // Fixup for making tileSizes be multiple of inner_tile_sizes.
+  SmallVector<int64_t> innerTiles = op.getStaticTiles();
+  ArrayRef<int64_t> dimPos = op.getInnerDimsPos();
+  for (auto it : llvm::zip(dimPos, innerTiles)) {
+    int64_t pos = std::get<0>(it);
+    int64_t size = std::get<1>(it);
+    if (tileSizes[pos] == 0 || ShapedType::isDynamic(size)) continue;
+    tileSizes[pos] = llvm::alignDown(tileSizes[pos], size);
+  }
+
+  TileSizesListType tileSizesList = {tileSizes};
+  return setOpConfigAndEntryPointFnTranslation(entryPointFn, op, tileSizesList,
+                                               pipeline);
 }
 
 /// Sets the lowering configuration for dispatch region for linalg_ext.fft
@@ -1205,11 +1217,34 @@ static LogicalResult setTransformStrategyRootConfig(
   }
   if (failed(matchAndSetCPUReductionTransformStrategy(entryPointFn, genericOp)))
     return success();
-  auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
-      entryPointFn->getContext(), IREE::Codegen::DispatchLoweringPassPipeline::
-                                      TransformDialectJitterCodegen);
-  setTranslationInfo(entryPointFn, translationInfo);
-  return success();
+  if (genericOp.getRegionOutputArgs().size() != 1) return success();
+
+  // Only support projected permutation, this could be extended to projected
+  // permutated with broadcast.
+  if (llvm::any_of(genericOp.getDpsInputOperands(), [&](OpOperand *input) {
+        return !genericOp.getMatchingIndexingMap(input)
+                    .isProjectedPermutation();
+      }))
+    return success();
+
+  // TODO: set the right config as expected by the strategy.
+  std::array<int64_t, 1> workgroupSize = {1};
+  SmallVector<unsigned> partitionedLoops =
+      cast<PartitionableLoopsInterface>(genericOp.getOperation())
+          .getPartitionableLoops(kNumMaxParallelDims);
+  size_t numLoops = partitionedLoops.empty() ? 0 : partitionedLoops.back() + 1;
+  // Tile all the parallel dimension to 1.
+  SmallVector<int64_t, 4> workgroupTileSizes(numLoops, 1);
+  SmallVector<int64_t, 4> threadTileSizes = workgroupTileSizes;
+  threadTileSizes.push_back(1);
+  TileSizesListType tileSizes;
+  tileSizes.emplace_back(std::move(workgroupTileSizes));  // Workgroup level
+  tileSizes.emplace_back(std::move(threadTileSizes));     // Thread level
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPointFn, genericOp, tileSizes,
+      IREE::Codegen::DispatchLoweringPassPipeline::
+          TransformDialectJitterCodegen,
+      workgroupSize);
 }
 
 /// Sets the lowering configuration for a generic op implementing a
@@ -1222,9 +1257,8 @@ static LogicalResult setTransposeLikeOpRootConfig(
     return success();
   }
 
-  auto variantOp = getExecutableVariantOp(genericOp);
-  assert(succeeded(variantOp) && "ExecutableVariantOp not found");
-  if (!hasAVX2Feature(*variantOp) || !isSupportedTransposeOp(genericOp)) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
+  if (!hasAVX2Feature(targetAttr) || !isSupportedTransposeOp(genericOp)) {
     return success();
   }
 
@@ -1312,8 +1346,8 @@ static LogicalResult setElementwiseGenericOpRootConfig(
   int64_t numWorkload = 1;
   for (auto en : llvm::enumerate(shape)) {
     int64_t size = en.value();
-    if (size == ShapedType::kDynamicSize) {
-      numWorkload = ShapedType::kDynamicSize;
+    if (size == ShapedType::kDynamic) {
+      numWorkload = ShapedType::kDynamic;
       break;
     }
     int index = en.index();
@@ -1326,8 +1360,8 @@ static LogicalResult setElementwiseGenericOpRootConfig(
        numWorkload < kMinimumWorkload && currDim < numLoops;) {
     int64_t currSize = flowTileSizes[currDim];
     if (currSize == shape[currDim] || currSize == 0 ||
-        shape[currDim] == ShapedType::kDynamicSize ||
-        numWorkload == ShapedType::kDynamicSize) {
+        shape[currDim] == ShapedType::kDynamic ||
+        numWorkload == ShapedType::kDynamic) {
       currDim++;
       continue;
     }
@@ -1445,24 +1479,23 @@ static SmallVector<int64_t> getConvWorkgroupSizes(func::FuncOp entryPointFn,
   assert(isSupported && "conv op is not supported");
 
   SmallVector<int64_t> tileSizes;
-  auto variantOp = getExecutableVariantOp(entryPointFn);
-  assert(succeeded(variantOp) && "ExecutableVariantOp not found");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
 
-  if (isX86(*variantOp)) {
+  if (isX86(targetAttr)) {
     TypeSwitch<Operation *>(op.getOperation())
         .Case<linalg::Conv2DNhwcHwcfOp>(
             [&](auto op) { tileSizes = {1, 1, 8, vectorSize * 2, 1, 1, 8}; })
         .Case<linalg::DepthwiseConv2DNhwcHwcOp>(
             [&](auto op) { tileSizes = {1, 1, 8, vectorSize * 2, 1, 3}; })
         .Default([&](Operation *op) { llvm_unreachable("unsupported conv"); });
-  } else if (isRISCV(*variantOp)) {
+  } else if (isRISCV(targetAttr)) {
     TypeSwitch<Operation *>(op.getOperation())
         .Case<linalg::Conv2DNhwcHwcfOp>(
             [&](auto op) { tileSizes = {1, 1, 8, vectorSize * 2, 1, 1, 8}; })
         .Case<linalg::DepthwiseConv2DNhwcHwcOp>(
             [&](auto op) { tileSizes = {1, 1, 8, vectorSize, 1, 3}; })
         .Default([&](Operation *op) { llvm_unreachable("unsupported conv"); });
-  } else if (isAArch64(*variantOp)) {
+  } else if (isAArch64(targetAttr)) {
     TypeSwitch<Operation *>(op.getOperation())
         .Case<linalg::Conv2DNhwcHwcfOp>(
             [&](auto op) { tileSizes = {1, 1, 32, 64, 1, 1, 16}; })
@@ -1527,7 +1560,18 @@ static LogicalResult setRootConfig(
   SmallVector<int64_t> ubs = linalgOp.getStaticLoopRanges();
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
       entryPointFn->getContext(), pipeline);
-  setTranslationInfo(entryPointFn, translationInfo);
+
+  // Always vectorize the ops for VMVX pipeline because stack allocation is not
+  // allowed.
+  if (pipeline == DispatchLoweringPassPipeline::VMVXDefault) {
+    for (int i = 0, e = ubs.size(); i < e; ++i) {
+      if (ubs[i] == ShapedType::kDynamic) ubs[i] = 1;
+    }
+  }
+
+  if (failed(setTranslationInfo(entryPointFn, translationInfo))) {
+    return failure();
+  }
   return setDefaultRootConfig(entryPointFn, partitionableLoopOp, lbs, ubs);
 }
 
@@ -1549,7 +1593,7 @@ static LogicalResult setRootConfig(
       tilingInterfaceOp.getIterationDomain(builder);
   auto getStaticValue = [](OpFoldResult ofr) -> int64_t {
     Optional<int64_t> intVal = getConstantIntValue(ofr);
-    if (!intVal) return ShapedType::kDynamicSize;
+    if (!intVal) return ShapedType::kDynamic;
     return intVal.value();
   };
   auto lbs = llvm::to_vector(llvm::map_range(
@@ -1558,7 +1602,9 @@ static LogicalResult setRootConfig(
       iterationDomain, [&](Range r) { return getStaticValue(r.size); }));
   auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
       entryPointFn->getContext(), pipeline);
-  setTranslationInfo(entryPointFn, translationInfo);
+  if (failed(setTranslationInfo(entryPointFn, translationInfo))) {
+    return failure();
+  }
   return setDefaultRootConfig(entryPointFn, partitionableLoopOp, lbs, ubs);
 }
 
@@ -1576,14 +1622,14 @@ static LogicalResult setRootConfigImpl(
           return setRootConfig(entryPointFn, op, LinalgOpInfo(op),
                                targetMLTransInfo);
         })
-        .Case<IREE::LinalgExt::FftOp, linalg::Mmt4DOp, linalg::Conv2DNhwcHwcfOp,
-              linalg::Conv2DNchwFchwOp, linalg::DepthwiseConv2DNhwcHwcOp>(
+        .Case<IREE::LinalgExt::FftOp, IREE::LinalgExt::PackOp,
+              IREE::LinalgExt::UnPackOp, linalg::Mmt4DOp,
+              linalg::Conv2DNhwcHwcfOp, linalg::Conv2DNchwFchwOp,
+              linalg::DepthwiseConv2DNhwcHwcOp>(
             [&](auto op) { return setRootConfig(entryPointFn, op); })
         .Case<linalg::ContractionOpInterface>(
             [&](auto op) { return setRootConfig(entryPointFn, op); })
         .Case<linalg::LinalgOp>(
-            [&](auto op) { return setRootConfig(entryPointFn, op); })
-        .Case<IREE::LinalgExt::PackOp>(
             [&](auto op) { return setRootConfig(entryPointFn, op); })
         .Case<TilingInterface>(
             [&](auto op) { return setRootConfig(entryPointFn, op); })
@@ -1601,7 +1647,7 @@ static LogicalResult setVMVXRootConfigImpl(func::FuncOp entryPointFn,
   // Redirect to individual operations.
   auto setRootConfigFn = [&](Operation *op) -> LogicalResult {
     return TypeSwitch<Operation *, LogicalResult>(op)
-        .Case<IREE::LinalgExt::FftOp>([&](auto op) {
+        .Case<IREE::LinalgExt::FftOp, IREE::LinalgExt::UnPackOp>([&](auto op) {
           return setRootConfig(entryPointFn, op,
                                DispatchLoweringPassPipeline::VMVXDefault);
         })
@@ -1662,15 +1708,14 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
   Operation *rootOperation = rootOp.value();
 
   if (rootOperation) {
-    auto variantOp = getExecutableVariantOp(entryPointFn);
-    assert(succeeded(variantOp) && "ExecutableVariantOp not found");
-    if (isVMVXBackend(*variantOp)) {
+    auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
+    if (isVMVXBackend(targetAttr)) {
       if (failed(setVMVXRootConfigImpl(entryPointFn, rootOperation))) {
         return failure();
       }
     } else {
       auto targetMLTransInfo =
-          TargetMLTransformInfo::getTargetMLTransformInfo(*variantOp);
+          TargetMLTransformInfo::getTargetMLTransformInfo(targetAttr);
       if (failed(setRootConfigImpl(entryPointFn, rootOperation,
                                    targetMLTransInfo))) {
         return failure();
@@ -1680,8 +1725,10 @@ static LogicalResult setRootConfig(func::FuncOp entryPointFn,
 
   if (!getTranslationInfo(entryPointFn)) {
     // Fall back, just set the translation to CPUDefault.
-    setTranslationInfo(entryPointFn, DispatchLoweringPassPipeline::CPUDefault,
-                       /*workgroupSize=*/ArrayRef<int64_t>{});
+    if (failed(setTranslationInfo(entryPointFn,
+                                  DispatchLoweringPassPipeline::CPUDefault))) {
+      return failure();
+    }
   }
 
   return success();
@@ -1719,14 +1766,14 @@ LogicalResult initCPULaunchConfig(ModuleOp moduleOp) {
       auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
           moduleOp.getContext(), IREE::Codegen::DispatchLoweringPassPipeline::
                                      TransformDialectInterpreterCodegen);
-      setTranslationInfo(funcOp, translationInfo);
+      if (failed(setTranslationInfo(funcOp, translationInfo))) return failure();
       continue;
     }
     if (clCPUEnableTransformDialectJit) {
       auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
           moduleOp.getContext(), IREE::Codegen::DispatchLoweringPassPipeline::
                                      TransformDialectJitterCodegen);
-      setTranslationInfo(funcOp, translationInfo);
+      if (failed(setTranslationInfo(funcOp, translationInfo))) return failure();
       continue;
     }
 

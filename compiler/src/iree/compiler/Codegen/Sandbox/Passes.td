@@ -56,8 +56,6 @@ def LinalgFuse : Pass<"linalg-fuse", "func::FuncOp"> {
     // IREE specific options
     Option<"tilingLevel", "tiling-level", "int64_t", /*default=*/"-1",
       "Use default tiling level used to retrieve the configuration from lowering_config">,
-    Option<"doIREEDistribution", "do-iree-distribution", "bool", /*default=*/"false",
-      "Apply IREE distribution during tiling">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect", "::mlir::AffineDialect",
@@ -101,8 +99,6 @@ def LinalgSingleTilingExpert
     ListOption<"tileInterchange", "tile-interchange", "int64_t",
                 "Tile loop interchange",
                 "llvm::cl::ZeroOrMore">,
-    ListOption<"peeledLoops", "peeled-loops", "int64_t", "Peeled loops",
-               "llvm::cl::ZeroOrMore">,
     Option<"pad", "pad", "bool", /*default=*/"false",
       "Pad the anchor op operands.">,
     ListOption<"paddingValues", "padding-values", "std::string",

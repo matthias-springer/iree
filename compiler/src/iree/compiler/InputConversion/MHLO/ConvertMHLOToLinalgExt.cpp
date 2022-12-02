@@ -246,8 +246,7 @@ struct ScatterOpConversion : public OpConversionPattern<mhlo::ScatterOp> {
 
     auto scatterOp = rewriter.create<IREE::LinalgExt::ScatterOp>(
         op.getLoc(), op->getResultTypes(), ValueRange{updates, indices},
-        ValueRange{original}, rewriter.getI64ArrayAttr(scatterDimMap),
-        op.getUniqueIndices());
+        ValueRange{original}, scatterDimMap, op.getUniqueIndices());
 
     rewriter.inlineRegionBefore(op.getUpdateComputation(),
                                 scatterOp.getRegion(),
@@ -296,7 +295,7 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
 
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(realType.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
+      if (en.value() == ShapedType::kDynamic) {
         dynSizes.push_back(b.create<tensor::DimOp>(real, en.index()));
       }
     }
@@ -386,7 +385,7 @@ struct FftOpConversion : public OpConversionPattern<mhlo::FftOp> {
     SmallVector<OpFoldResult> sizes;
     Value operand = adaptor.getOperand();
     for (auto dim : llvm::enumerate(operandType.getShape().drop_back())) {
-      if (dim.value() != ShapedType::kDynamicSize) {
+      if (dim.value() != ShapedType::kDynamic) {
         sizes.push_back(b.getIndexAttr(dim.value()));
       } else {
         sizes.push_back(b.createOrFold<tensor::DimOp>(operand, dim.index()));
@@ -418,7 +417,7 @@ struct ReverseOpConversion : public OpConversionPattern<mhlo::ReverseOp> {
     Location loc = op.getLoc();
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(ty.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
+      if (en.value() == ShapedType::kDynamic) {
         dynSizes.push_back(rewriter.create<tensor::DimOp>(
             loc, adaptor.getOperands()[0], en.index()));
       }
@@ -464,7 +463,7 @@ struct TopkOpConversion : public OpConversionPattern<chlo::TopKOp> {
     // Define the output types based on the results of CHLO TopK
     SmallVector<Value> dynSizes;
     for (auto en : llvm::enumerate(inputValuesType.getShape())) {
-      if (en.value() == ShapedType::kDynamicSize) {
+      if (en.value() == ShapedType::kDynamic) {
         dynSizes.push_back(rewriter.create<tensor::DimOp>(
             loc, adaptor.getOperand(), en.index()));
       }
