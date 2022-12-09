@@ -153,6 +153,15 @@ static void addForeachThreadCapturePromotionPatterns(
   patterns.add<PromoteCaptureToSharedOut>(patterns.getContext());
 }
 
+static void addReassociativeReshapePatterns(RewritePatternSet &patterns) {
+  tensor::populateReassociativeReshapeFoldingPatterns(patterns);
+}
+
+static void addEraseUnnecessaryTensorOperandsPatterns(
+    RewritePatternSet &patterns) {
+  linalg::populateEraseUnnecessaryInputsPatterns(patterns);
+}
+
 static void addRankReducingPatterns(RewritePatternSet &patterns) {
   populateReshapeToInterfaceTensorPatterns(patterns);
   vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
@@ -199,6 +208,9 @@ DiagnosedSilenceableFailure transform_dialect::ApplyPatternsOp::applyToOne(
   MLIRContext *ctx = target->getContext();
   RewritePatternSet patterns(ctx);
   if (getCanonicalization()) addAllRegisteredCanonicalizationPatterns(patterns);
+  if (getEraseUnnecessaryTensorOperands())
+    addEraseUnnecessaryTensorOperandsPatterns(patterns);
+  if (getFoldReassociativeReshapes()) addReassociativeReshapePatterns(patterns);
   if (getPromoteForeachThreadCaptureToShared())
     addForeachThreadCapturePromotionPatterns(patterns);
   if (getRankReducing()) addRankReducingPatterns(patterns);
@@ -877,35 +889,7 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
     memCpyFn = gpuComprehensiveBufferizeCopyFn;
   }
 
-  //   0. Run enabling transformations.
-  {
-    RewritePatternSet patterns(getContext());
-    tensor::populateReassociativeReshapeFoldingPatterns(patterns);
-    TrackingListener listener(state);
-    GreedyRewriteConfig config;
-    LogicalResult result = applyPatternsAndFoldGreedily(
-        state.getTopLevel(), std::move(patterns), config, &listener);
-    LogicalResult listenerResult = listener.checkErrorState();
-    if (failed(result)) {
-      return mlir::emitDefiniteFailure(state.getTopLevel(),
-                                       "greedy pattern application failed");
-    }
-    if (failed(listenerResult))
-      return mlir::emitDefiniteFailure(state.getTopLevel(),
-                                       "listener tracking failed");
-  }
-
-  //   1. Eliminate tensor.empty, without the pass baggage.
-  WalkResult res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
-    if (failed(eliminateEmptyTensors(moduleOp.getOperation(),
-                                     getBufferizationOptions())))
-      return WalkResult::interrupt();
-    return WalkResult::advance();
-  });
-  if (res.wasInterrupted())
-    return DiagnosedSilenceableFailure::definiteFailure();
-
-  //   2. Rewrite tensor.empty to tensor.alloc, without the pass baggage.
+  //   1. Rewrite tensor.empty to tensor.alloc, without the pass baggage.
   {
     RewritePatternSet patterns(getContext());
     patterns.add<EmptyTensorLoweringPattern>(patterns.getContext());
@@ -923,14 +907,14 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
                                        "listener tracking failed");
   }
 
-  //   3. Run one-shot-bufferize, without the pass baggage.
+  //   2. Run one-shot-bufferize, without the pass baggage.
   OneShotBufferizationOptions options = getBufferizationOptions();
   options.allocationFn = allocationFn;
   options.deallocationFn = deallocationFn;
   options.memCpyFn = memCpyFn;
   options.testAnalysisOnly = getTestAnalysisOnly();
   options.printConflicts = getPrintConflicts();
-  res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
+  WalkResult res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
     if (failed(runIREEOneShotBufferize(moduleOp, options)))
       return WalkResult::interrupt();
     return WalkResult::advance();
@@ -938,7 +922,7 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
   if (res.wasInterrupted())
     return DiagnosedSilenceableFailure::definiteFailure();
 
-  //   4. Post-bufferization passes are fine.
+  //   3. Post-bufferization passes are fine.
   PassManager pm(getContext());
   addIREEPostBufferizationPasses(pm);
   res = state.getTopLevel()->walk([&](ModuleOp moduleOp) {
@@ -955,6 +939,24 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
     return DiagnosedSilenceableFailure::definiteFailure();
 
   results.set(getOperation()->getOpResult(0), payload.front());
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
+// IREEEliminateEmptyTensorsOp
+//===---------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure
+transform_dialect::IREEEliminateEmptyTensorsOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  ArrayRef<Operation *> payloads = state.getPayloadOps(getTarget());
+  for (Operation *payload : payloads) {
+    if (failed(eliminateEmptyTensors(payload, getBufferizationOptions()))) {
+      getOperation()->emitError() << "failed to eliminate tensor.empty ops";
+      return DiagnosedSilenceableFailure::definiteFailure();
+    }
+  }
+  results.set(getOperation()->getOpResult(0), payloads);
   return DiagnosedSilenceableFailure::success();
 }
 
