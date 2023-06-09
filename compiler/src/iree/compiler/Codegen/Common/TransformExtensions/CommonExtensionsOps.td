@@ -70,8 +70,6 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
 
     The following additive attributes can be set, they add patterns in an
     unspecified order:
-      - additional_iree_patterns: fancy patterns we shortcut into the system,
-      will need to be sliced out better in the future.
       - bubble_collapse: bubble `collapse_shape` down across Linalg ops. This
       must be applied separately from `bubble_expand` patterns because of some
       upstream pattern interference issue atm.
@@ -151,7 +149,6 @@ def ApplyPatternsOp : Op<Transform_Dialect, "iree.apply_patterns",
   }];
 
   let arguments = (ins TransformHandleTypeInterface:$target,
-                       UnitAttr:$additional_iree_patterns,
                        UnitAttr:$bubble_collapse,
                        UnitAttr:$bubble_expand,
                        UnitAttr:$bubble_pack_un_pack,
