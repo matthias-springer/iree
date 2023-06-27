@@ -98,17 +98,22 @@ void mlir::iree_compiler::createTransformRegion(
   OpBuilder b(ctx);
   b.setInsertionPointAfter(entryPoint);
   auto topLevelTransformModule = b.create<ModuleOp>(loc);
+  topLevelTransformModule->setAttr(
+      b.getStringAttr(transform::TransformDialect::kWithNamedSequenceAttrName),
+      b.getUnitAttr());
   Region &topLevelTransformRegion = topLevelTransformModule.getBodyRegion();
   b.setInsertionPointToStart(&topLevelTransformRegion.front());
   auto anyOpType = transform::AnyOpType::get(b.getContext());
   auto sequence = b.create<transform::SequenceOp>(
       loc, TypeRange{}, transform::FailurePropagationMode::Propagate, anyOpType,
       [&](OpBuilder &b, Location loc, Value variantH) {
-        ImplicitLocOpBuilder ib(loc, b);
-        buildStrategy(ib, variantH);
         b.create<transform::YieldOp>(loc);
       });
-  (void)sequence;
+  // Populate sequence after inserting it, so that helper functions can find
+  // the enclosing module.
+  ImplicitLocOpBuilder ib(loc, ctx);
+  ib.setInsertionPointToStart(&sequence.getBody().front());
+  buildStrategy(ib, sequence.getBody().getArgument(0));
   LDBG("transformation script:\n");
   LDBG("verification: " << sequence.verify().succeeded() << "\n");
 }
@@ -131,10 +136,40 @@ void mlir::iree_compiler::buildPrint(ImplicitLocOpBuilder &b,
 /// In addition to the specified transform, perform the following ones:
 ///   tiling-related canonicalization patterns, canonicalization, licm and cse
 ///   (in this order).
+/// For better readability, these transforms are added to a named sequence.
+// TODO: Do not create duplicate named sequences.
 void mlir::iree_compiler::buildCanonicalizationAndEnablingTransforms(
     ImplicitLocOpBuilder &b, Value funcH,
     ApplyPatternsOpBodyBuilderFn populatePatternsFn) {
-  b.create<transform::ApplyPatternsOp>(funcH, [&](OpBuilder &b, Location loc) {
+  auto ip = b.saveInsertionPoint();
+  ModuleOp transformModule =
+      b.getInsertionBlock()->getParent()->getParentOfType<ModuleOp>();
+  assert(transformModule && "could not find enclosing module");
+
+  // Create transform.named_sequence op.
+  SmallVector<Type> funcInputTypes(1, funcH.getType());
+  SmallVector<Location> locs(1, funcH.getLoc());
+  FunctionType funcType = FunctionType::get(b.getContext(), funcInputTypes,
+                                            /*results=*/TypeRange());
+  b.clearInsertionPoint();
+  auto namedSequence = b.create<transform::NamedSequenceOp>(
+      /*sym_name=*/b.getStringAttr("canonicalization"),
+      /*function_type=*/TypeAttr::get(funcType),
+      /*sym_visibility=*/StringAttr(),
+      /*arg_attrs=*/
+      b.getArrayAttr({b.getDictionaryAttr(
+          {b.getNamedAttr(transform::TransformDialect::kArgReadOnlyAttrName,
+                          b.getUnitAttr())})}),
+      /*res_attrs=*/ArrayAttr());
+  Block *block =
+      b.createBlock(&namedSequence.getBody(), namedSequence.getBody().begin(),
+                    funcInputTypes, locs);
+  SymbolTable symbolTable(transformModule);
+  StringAttr insertedName = symbolTable.insert(namedSequence);
+
+  // Add ops to the named sequence.
+  BlockArgument bbArg = block->getArgument(0);
+  b.create<transform::ApplyPatternsOp>(bbArg, [&](OpBuilder &b, Location loc) {
     b.create<transform::ApplyTilingCanonicalizationPatternsOp>(loc);
     b.create<IREE::transform_dialect::ApplyFoldFillIntoPadPatternsOp>(loc);
     b.create<transform::ApplyForLoopCanonicalizationPatternsOp>(loc);
@@ -142,9 +177,17 @@ void mlir::iree_compiler::buildCanonicalizationAndEnablingTransforms(
     if (populatePatternsFn)
       populatePatternsFn(b, loc);
   });
-  b.create<IREE::transform_dialect::ApplyLoopIndependentCodeMotionOp>(funcH);
+  b.create<IREE::transform_dialect::ApplyLoopIndependentCodeMotionOp>(bbArg);
   b.create<IREE::transform_dialect::ApplyCommonSubexpressionEliminationOp>(
-      funcH);
+      bbArg);
+  b.create<transform::YieldOp>();
+
+  // Create transform.include op.
+  b.restoreInsertionPoint(ip);
+  SmallVector<Value> args(1, funcH);
+  b.create<transform::IncludeOp>(TypeRange(), SymbolRefAttr::get(insertedName),
+                                 transform::FailurePropagationMode::Propagate,
+                                 args);
 }
 
 /// Dynamically selects the first non-empty handle; i.e. if (h1, h2) is:
