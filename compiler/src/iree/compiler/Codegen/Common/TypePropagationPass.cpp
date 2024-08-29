@@ -214,7 +214,9 @@ struct GenericOpTypePropagation
     // type.
     TypeConverter::SignatureConversion signatureConverter(
         modifiedOpRegion.getNumArguments());
+    SmallVector<BlockArgument> origBlockArgs;
     for (auto [index, arg] : llvm::enumerate(modifiedOpRegion.getArguments())) {
+      origBlockArgs.push_back(arg);
       Type argType = arg.getType();
       if (!modifiedOperandIndex.count(index)) {
         signatureConverter.addInputs(index, argType);
@@ -250,7 +252,8 @@ struct GenericOpTypePropagation
         rewriter.setInsertionPointToStart(entryBlock);
         Value replacement =
             convertElementType(rewriter, source.getLoc(), destType, source);
-        rewriter.replaceUsesOfBlockArgument(source, replacement);
+        rewriter.replaceUsesOfBlockArgument(
+            origBlockArgs[source.getArgNumber()], replacement);
       }
 
       // 6b. If any of the operands modified were outputs, the yield values
@@ -359,6 +362,8 @@ struct IREELinalgExtScatterTypePropagation
                                 modifiedOp->getRegions().front(),
                                 modifiedOp->getRegions().front().begin());
     Region &modifiedOpRegion = modifiedOp->getRegions().front();
+    SmallVector<BlockArgument> origBlockArgs =
+        llvm::to_vector(modifiedOpRegion.getArguments());
 
     // Convert the signature of the region to use the corresponding element
     // type.
@@ -387,12 +392,10 @@ struct IREELinalgExtScatterTypePropagation
 
       Value replacementInput =
           convertElementType(rewriter, inputArg.getLoc(), destType, inputArg);
-      rewriter.replaceUsesOfBlockArgument(entryBlock->getArgument(0),
-                                          replacementInput);
+      rewriter.replaceUsesOfBlockArgument(origBlockArgs[0], replacementInput);
       Value replacementOutput =
           convertElementType(rewriter, outputArg.getLoc(), destType, outputArg);
-      rewriter.replaceUsesOfBlockArgument(entryBlock->getArgument(1),
-                                          replacementOutput);
+      rewriter.replaceUsesOfBlockArgument(origBlockArgs[1], replacementOutput);
 
       // If the output is of an illegal type, the yield value needs to be
       // modified
@@ -435,6 +438,8 @@ struct IREELinalgExtSortTypePropagation
                                 modifiedOp->getRegions().front(),
                                 modifiedOp->getRegions().front().begin());
     Region &modifiedOpRegion = modifiedOp->getRegions().front();
+    SmallVector<BlockArgument> origBlockArgs =
+        llvm::to_vector(modifiedOpRegion.getArguments());
 
     // Convert the signature of the region to use the corresponding element
     // type.
@@ -465,11 +470,11 @@ struct IREELinalgExtSortTypePropagation
         if (destType != getElementTypeOrSelf(legalizedResultTypes[index])) {
           Value replacementFirstInput = convertElementType(
               rewriter, firstInputArg.getLoc(), destType, firstInputArg);
-          rewriter.replaceUsesOfBlockArgument(firstInputArg,
+          rewriter.replaceUsesOfBlockArgument(origBlockArgs[index * 2],
                                               replacementFirstInput);
           Value replacementSecondInput = convertElementType(
               rewriter, secondInputArg.getLoc(), destType, secondInputArg);
-          rewriter.replaceUsesOfBlockArgument(secondInputArg,
+          rewriter.replaceUsesOfBlockArgument(origBlockArgs[index * 2 + 1],
                                               replacementSecondInput);
         }
       }
@@ -621,9 +626,10 @@ struct TypePropagationPass final
       }
       return true;
     });
-
+    ConversionConfig config;
+    config.buildMaterializations = false;
     if (failed(applyPartialConversion(getOperation(), target,
-                                      std::move(patterns)))) {
+                                      std::move(patterns), config))) {
       signalPassFailure();
     }
   }
