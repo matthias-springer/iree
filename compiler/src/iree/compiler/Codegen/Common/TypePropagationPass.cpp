@@ -531,6 +531,11 @@ struct TypePropagationPass final
           assert(inputs.size() == 1 && "expected exactly one input");
           return convertElementType(builder, loc, type, inputs[0]);
         });
+    typeConverter.addSourceMaterialization(
+        [&](OpBuilder &builder, Type type, ValueRange inputs, Location loc) {
+          assert(inputs.size() == 1 && "expected exactly one input");
+          return convertElementType(builder, loc, type, inputs[0]);
+        });
 
     patterns.insert<
         ConstantOpTypeConversion, ForwardSourceType<arith::ExtUIOp>,
